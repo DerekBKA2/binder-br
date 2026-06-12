@@ -3503,11 +3503,30 @@
         return Array.from(new Set(published ? [...proxied, ...direct] : [...direct, ...proxied]));
       }
 
+      function getTcgplayerProductId(card) {
+        const pricing = card?.raw?.pricing?.tcgplayer;
+        if (!pricing || typeof pricing !== "object") return "";
+        for (const value of Object.values(pricing)) {
+          if (!value || typeof value !== "object") continue;
+          const productId = value.productId || value.productID || value.idProduct;
+          if (productId) return String(productId);
+        }
+        return "";
+      }
+
+      function getTcgplayerImageUrl(card, size = "low") {
+        const productId = getTcgplayerProductId(card);
+        if (!productId) return "";
+        const dimensions = size === "high" ? "1000x1000" : "800x800";
+        return `https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(productId)}_in_${dimensions}.jpg`;
+      }
+
       function getCardImageCandidates(card, size = "low") {
-        if (!card?.image) return [];
+        if (!card) return [];
         const direct = normalizeCardImageUrl(card.image, size);
         const alternateSize = size === "high" ? normalizeCardImageUrl(card.image, "low") : "";
-        return orderImageCandidates([direct, alternateSize]);
+        const tcgplayer = getTcgplayerImageUrl(card, size);
+        return Array.from(new Set([tcgplayer, ...orderImageCandidates([direct, alternateSize])].filter(Boolean)));
       }
 
       function renderCardImage(card, size = "low", loading = "lazy") {
