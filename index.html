@@ -2134,6 +2134,7 @@
       const CLOUD_FILE_NAME = "binder-br-sync.json";
       const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
       const CLOUD_SYNC_DELAY_MS = 1600;
+      const TCGDEX_ASSET_HOST_ENABLED = false;
       const CART_LIST_PAGE_SIZE = 110;
       const HOME_PAGE_SIZE = 72;
       const SERIES_RANK = {
@@ -2901,10 +2902,10 @@
             normalizedSet.cardCount = normalizedSet.cardCount || cards.length;
             normalizedSet.cardsLoadedAt = new Date().toISOString();
             mergeSet(normalizedSet, true);
-            cards.forEach((card) => mergeCard(card, true));
+            const mergedCards = cards.map((card) => mergeCard(card)).filter(Boolean);
             await Promise.all([
               idbPut("sets", normalizedSet),
-              idbPutMany("cards", cards)
+              idbPutMany("cards", mergedCards)
             ]);
           } catch (error) {
             if (isTcgdexNotFoundError(error)) {
@@ -3096,10 +3097,10 @@
           normalizedSet.cardCount = normalizedSet.cardCount || cards.length;
           normalizedSet.cardsLoadedAt = new Date().toISOString();
           mergeSet(normalizedSet, true);
-          cards.forEach((card) => mergeCard(card, true));
+          const mergedCards = cards.map((card) => mergeCard(card)).filter(Boolean);
           await Promise.all([
             idbPut("sets", normalizedSet),
-            idbPutMany("cards", cards)
+            idbPutMany("cards", mergedCards)
           ]);
           renderAll();
           syncCardDetailsForSet(normalizedSet.key);
@@ -3126,7 +3127,12 @@
         if (!set) return;
         const cards = getCardsForSet(setKey);
         if (!cards.length) return;
-        const needsDetail = cards.filter((card) => !card.variantsKnown || !card.rarity || !card.illustrator);
+        const needsDetail = cards.filter((card) =>
+          !card.variantsKnown ||
+          !card.rarity ||
+          !card.illustrator ||
+          (!TCGDEX_ASSET_HOST_ENABLED && !getTcgplayerProductId(card))
+        );
         if (!needsDetail.length) return;
 
         state.syncingCardDetails.add(setKey);
@@ -3136,8 +3142,8 @@
             const detail = await fetchCardDetail(card);
             if (!detail) return;
             const normalized = normalizeCardRecord(detail, card.lang, card.setId);
-            mergeCard(normalized, true);
-            await idbPut("cards", normalized);
+            const merged = mergeCard(normalized);
+            await idbPut("cards", merged);
           } catch (error) {
             console.warn("Card detail skipped:", card.key, error);
           } finally {
@@ -3425,17 +3431,37 @@
         const current = bucket.get(incoming.key);
         if (!current) {
           bucket.set(incoming.key, incoming);
-          return;
+          return incoming;
         }
-        const merged = { ...current, ...incoming };
-        if (current.variantsKnown && !incoming.variantsKnown) {
+        const merged = { ...current };
+        Object.entries(incoming).forEach(([key, value]) => {
+          if (key === "raw" || key === "variants" || key === "variantsKnown") return;
+          const hasValue = value !== undefined && value !== null && value !== "";
+          if (hasValue) merged[key] = value;
+        });
+        const currentRawScore = getCardRawDetailScore(current.raw);
+        const incomingRawScore = getCardRawDetailScore(incoming.raw);
+        merged.raw = incomingRawScore >= currentRawScore ? incoming.raw : current.raw;
+        if (incoming.variantsKnown || !current.variantsKnown) {
+          merged.variants = incoming.variants;
+          merged.variantsKnown = Boolean(incoming.variantsKnown);
+        } else {
           merged.variants = current.variants;
           merged.variantsKnown = true;
         }
-        if (current.raw && !incoming.raw) {
-          merged.raw = current.raw;
-        }
         bucket.set(incoming.key, merged);
+        return merged;
+      }
+
+      function getCardRawDetailScore(raw) {
+        if (!raw || typeof raw !== "object") return 0;
+        let score = Object.keys(raw).length;
+        if (raw.variants) score += 20;
+        if (raw.rarity) score += 10;
+        if (raw.illustrator) score += 10;
+        if (raw.category) score += 10;
+        if (raw.pricing?.tcgplayer) score += 100;
+        return score;
       }
 
       function ensureCardBucket(setKey) {
@@ -3497,6 +3523,7 @@
       }
 
       function orderImageCandidates(urls) {
+        if (!TCGDEX_ASSET_HOST_ENABLED) return [];
         const direct = Array.from(new Set(urls.filter(Boolean)));
         const proxied = direct.map(makeImageProxyUrl).filter(Boolean);
         const published = location.hostname.endsWith("github.io");
@@ -3523,10 +3550,12 @@
 
       function getCardImageCandidates(card, size = "low") {
         if (!card) return [];
+        const tcgplayer = getTcgplayerImageUrl(card, size);
+        if (tcgplayer) return [tcgplayer];
+        if (!TCGDEX_ASSET_HOST_ENABLED) return [];
         const direct = normalizeCardImageUrl(card.image, size);
         const alternateSize = size === "high" ? normalizeCardImageUrl(card.image, "low") : "";
-        const tcgplayer = getTcgplayerImageUrl(card, size);
-        return Array.from(new Set([tcgplayer, ...orderImageCandidates([direct, alternateSize])].filter(Boolean)));
+        return orderImageCandidates([direct, alternateSize]);
       }
 
       function renderCardImage(card, size = "low", loading = "lazy") {
