@@ -2163,21 +2163,27 @@
       };
       const SET_LOGO_FALLBACKS = {
         "pt-br:sv08": [
-          "https://assets.tcgdex.net/pt/sv/sv08/logo",
-          "https://assets.tcgdex.net/en/sv/sv08/logo"
+          "https://images.pokemontcg.io/sv8/logo.png"
         ],
         "pt-br:fagulhas-impetuosas": [
-          "https://assets.tcgdex.net/pt/sv/sv08/logo",
-          "https://assets.tcgdex.net/en/sv/sv08/logo"
+          "https://images.pokemontcg.io/sv8/logo.png"
         ],
         "pt-br:sm35": [
-          "https://assets.tcgdex.net/pt/sm/sm35/logo",
-          "https://assets.tcgdex.net/en/sm/sm35/logo"
+          "https://images.pokemontcg.io/sm35/logo.png"
         ],
         "pt-br:lendas-luminescentes": [
-          "https://assets.tcgdex.net/pt/sm/sm35/logo",
-          "https://assets.tcgdex.net/en/sm/sm35/logo"
+          "https://images.pokemontcg.io/sm35/logo.png"
         ]
+      };
+      const PKMN_GG_SET_LOGOS = {
+        me01: "https://site.pkmn.gg/images/sets/logos/me01.webp?signature=ea7e25dd021958d2bf6b7bff15ddb7eb5866382e76bea23891423fc543052ac3",
+        me02: "https://site.pkmn.gg/images/sets/logos/me02.webp?signature=07b611e79bd8a387ed1fec3ce647777837d99b57c76d6a6ea66a67b09acdb67a",
+        "me02.5": "https://site.pkmn.gg/images/sets/logos/me02pt5.webp?signature=dd7106d0b95f2f47e40268c829d9c89f26937d348cf62f8f21cea60e8b9af819",
+        me03: "https://site.pkmn.gg/images/sets/logos/me03.webp?signature=57151081cb66a8e290be3c8c083bd7c87d701e9860a1d0c4a53684ea87b12a56",
+        me04: "https://site.pkmn.gg/images/sets/logos/me04.webp?signature=87af17e6f62df67e630c17f79edcf1c9a663ccbb27257e7e95772093d6a633ef",
+        me05: "https://site.pkmn.gg/images/sets/logos/me05.webp?signature=365b11541f305c79601a06b01c352de26fd28436453fc9a0bf10c3563c63dbd7",
+        mee: "https://site.pkmn.gg/images/sets/logos/mee.webp?signature=4001a327fe1d270cef74e400ab79243905382dfb75e45c3883ecf462b2ad23a4",
+        mep: "https://site.pkmn.gg/images/sets/logos/MEP.webp?signature=3a68db8a711a08b62da56af543019e74de09f8fa3f28fbfeb6ba64d8d998e732"
       };
       const VARIANT_LABELS = {
         normal: "Normal",
@@ -3568,30 +3574,57 @@
         return `<img src="${escapeAttr(candidates[0])}" alt="${escapeAttr(card.name)}" referrerpolicy="no-referrer"${loadingAttr}${fallbackAttr}>`;
       }
 
+      function getPokemonTcgSetId(setId) {
+        const id = String(setId || "").trim().toLowerCase();
+        if (!id) return "";
+        const exact = {
+          "me02.5": "me2pt5",
+          "sv03.5": "sv3pt5",
+          "sv04.5": "sv4pt5",
+          "sv06.5": "sv6pt5",
+          "sv08.5": "sv8pt5"
+        };
+        if (exact[id]) return exact[id];
+        return id.replace(/^([a-z]+)0+(\d)/, "$1$2").replace(/\.(\d+)$/, "pt$1");
+      }
+
       function getSetAssetCandidates(set) {
         if (!set) return [];
-        const values = [];
-        const add = (value) => {
+        const stableValues = [];
+        const tcgdexValues = [];
+        const addTo = (target, value) => {
           if (Array.isArray(value)) {
-            value.forEach(add);
+            value.forEach((item) => addTo(target, item));
             return;
           }
-          if (value) values.push(value);
+          if (value) target.push(value);
         };
         const seriesId = set.seriesId || inferSeriesId(set.logo || set.symbol || "");
-        add(set.logo);
-        add(getNamedLogoFallbacks(set));
+        const normalizedSetId = String(set.id || "").toLowerCase();
+        const pokemonTcgSetId = getPokemonTcgSetId(normalizedSetId);
+
+        // Set logos use independent fallbacks so disabling a broken TCGdex asset host
+        // never removes logos from headers, series pages, or the trophy room.
+        addTo(stableValues, PKMN_GG_SET_LOGOS[normalizedSetId]);
+        addTo(stableValues, getNamedLogoFallbacks(set));
+        if (pokemonTcgSetId) {
+          addTo(stableValues, `https://images.pokemontcg.io/${pokemonTcgSetId}/logo.png`);
+        }
+
+        addTo(tcgdexValues, set.logo);
         if (seriesId && set.id) {
-          add(`https://assets.tcgdex.net/${getApiLanguage(set.lang)}/${seriesId}/${set.id}/logo`);
+          addTo(tcgdexValues, `https://assets.tcgdex.net/${getApiLanguage(set.lang)}/${seriesId}/${set.id}/logo`);
           if (set.lang !== "en") {
-            add(`https://assets.tcgdex.net/en/${seriesId}/${set.id}/logo`);
+            addTo(tcgdexValues, `https://assets.tcgdex.net/en/${seriesId}/${set.id}/logo`);
           }
         }
-        add(set.symbol);
+        addTo(tcgdexValues, set.symbol);
         if (seriesId && set.id) {
-          add(`https://assets.tcgdex.net/univ/${seriesId}/${set.id}/symbol`);
+          addTo(tcgdexValues, `https://assets.tcgdex.net/univ/${seriesId}/${set.id}/symbol`);
         }
-        return orderImageCandidates(values.map(normalizeSetAssetUrl).filter(Boolean));
+        const stable = stableValues.map(normalizeSetAssetUrl).filter(Boolean);
+        const tcgdex = orderImageCandidates(tcgdexValues.map(normalizeSetAssetUrl).filter(Boolean));
+        return Array.from(new Set([...stable, ...tcgdex]));
       }
 
       function getNamedLogoFallbacks(set) {
