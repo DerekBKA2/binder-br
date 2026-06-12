@@ -3491,6 +3491,35 @@
         return `${trimmed}.webp`;
       }
 
+      function makeImageProxyUrl(url) {
+        if (!url || !/^https:\/\/assets\.tcgdex\.net\//i.test(url)) return "";
+        return `https://images.weserv.nl/?url=${encodeURIComponent(url)}&output=webp`;
+      }
+
+      function orderImageCandidates(urls) {
+        const direct = Array.from(new Set(urls.filter(Boolean)));
+        const proxied = direct.map(makeImageProxyUrl).filter(Boolean);
+        const published = location.hostname.endsWith("github.io");
+        return Array.from(new Set(published ? [...proxied, ...direct] : [...direct, ...proxied]));
+      }
+
+      function getCardImageCandidates(card, size = "low") {
+        if (!card?.image) return [];
+        const direct = normalizeCardImageUrl(card.image, size);
+        const alternateSize = size === "high" ? normalizeCardImageUrl(card.image, "low") : "";
+        return orderImageCandidates([direct, alternateSize]);
+      }
+
+      function renderCardImage(card, size = "low", loading = "lazy") {
+        const candidates = getCardImageCandidates(card, size);
+        if (!candidates.length) return "";
+        const fallbackAttr = candidates.length > 1
+          ? ` data-fallback-srcs="${escapeAttr(candidates.slice(1).join("|"))}"`
+          : "";
+        const loadingAttr = loading ? ` loading="${escapeAttr(loading)}"` : "";
+        return `<img src="${escapeAttr(candidates[0])}" alt="${escapeAttr(card.name)}" referrerpolicy="no-referrer"${loadingAttr}${fallbackAttr}>`;
+      }
+
       function getSetAssetCandidates(set) {
         if (!set) return [];
         const values = [];
@@ -3514,7 +3543,7 @@
         if (seriesId && set.id) {
           add(`https://assets.tcgdex.net/univ/${seriesId}/${set.id}/symbol`);
         }
-        return Array.from(new Set(values.map(normalizeSetAssetUrl).filter(Boolean)));
+        return orderImageCandidates(values.map(normalizeSetAssetUrl).filter(Boolean));
       }
 
       function getNamedLogoFallbacks(set) {
@@ -3535,7 +3564,7 @@
           ? ` data-fallback-srcs="${escapeAttr(candidates.slice(1).join("|"))}"`
           : "";
         const loadingAttr = loading ? ` loading="${escapeAttr(loading)}"` : "";
-        return `<img src="${escapeAttr(candidates[0])}" alt="${escapeAttr(altText)}"${loadingAttr}${fallbackAttr} data-logo-text="${escapeAttr(fallbackText)}">`;
+        return `<img src="${escapeAttr(candidates[0])}" alt="${escapeAttr(altText)}" referrerpolicy="no-referrer"${loadingAttr}${fallbackAttr} data-logo-text="${escapeAttr(fallbackText)}">`;
       }
 
       function tryNextImageFallback(img) {
@@ -4038,7 +4067,7 @@
         const totalQty = getTotalQuantity(card.key);
         const ownedClass = totalQty > 0 ? "owned" : "missing";
         const dupeClass = totalQty > 1 ? "duplicate" : "";
-        const imageUrl = normalizeCardImageUrl(card.image, "low");
+        const cardImage = renderCardImage(card, "low", "lazy");
         const variants = getVariantKeys(card);
         const variantButtons = variants.map((variant) => {
           const qty = collection[`${variant}Qty`] || 0;
@@ -4054,8 +4083,8 @@
         const cartButtons = renderVariantCartButtons(card, "cart-icon");
         return `
           <article class="card-tile ${ownedClass} ${dupeClass}" data-card-key="${escapeAttr(card.key)}">
-            <div class="card-image-shell ${imageUrl ? "" : "image-missing"}">
-              ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(card.name)}" loading="lazy">` : ""}
+            <div class="card-image-shell ${cardImage ? "" : "image-missing"}">
+              ${cardImage}
               <div class="image-placeholder">No image</div>
               <div class="variant-stack">${variantButtons}</div>
             </div>
@@ -4080,7 +4109,7 @@
       function renderCardRow(card, set) {
         const collection = getCollection(card.key);
         const totalQty = getTotalQuantity(card.key);
-        const imageUrl = normalizeCardImageUrl(card.image, "low");
+        const cardImage = renderCardImage(card, "low", "lazy");
         const variants = getVariantKeys(card).map((variant) => {
           const qty = collection[`${variant}Qty`] || 0;
           return `
@@ -4096,7 +4125,7 @@
         return `
           <article class="card-row ${totalQty > 0 ? "owned" : "missing"}" data-card-key="${escapeAttr(card.key)}">
             <div class="card-row-thumb">
-              ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(card.name)}" loading="lazy">` : `<span class="card-row-sub">No image</span>`}
+              ${cardImage || `<span class="card-row-sub">No image</span>`}
             </div>
             <div class="card-row-main">
               <div class="card-row-name">${escapeHtml(card.name)}</div>
@@ -4731,7 +4760,7 @@
         if (!card) return;
         const set = state.sets.get(card.setKey) || state.sets.get(state.selectedSetKey);
         const collection = getCollection(card.key);
-        const imageUrl = normalizeCardImageUrl(card.image, "high") || normalizeCardImageUrl(card.image, "low");
+        const cardImage = renderCardImage(card, "high", "");
         const variantButtons = getVariantKeys(card).map((variant) => {
           const qty = collection[`${variant}Qty`] || 0;
           return `
@@ -4746,7 +4775,7 @@
         els.cardPreview.innerHTML = `
           <article class="preview-dialog" role="dialog" aria-modal="true" aria-label="${escapeAttr(card.name)}">
             <div class="preview-image">
-              ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(card.name)}">` : `<span class="card-row-sub">No image</span>`}
+              ${cardImage || `<span class="card-row-sub">No image</span>`}
             </div>
             <div class="preview-info">
               <button type="button" data-close-preview>Close</button>
