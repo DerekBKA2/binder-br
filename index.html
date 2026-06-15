@@ -3366,7 +3366,7 @@
           inferred = true;
         }
 
-        const resolved = resolveTwoVariantSlots(variants, raw);
+        const resolved = resolvePhysicalVariantSlots(variants, raw);
         inferred = inferred || resolved.normal !== Boolean(variants.normal) || resolved.holo !== Boolean(variants.holo) || resolved.reverse !== Boolean(variants.reverse);
         return { variants: resolved, inferred };
       }
@@ -3386,12 +3386,29 @@
         return /(holo|holograf|holographic|rare|rara|raro|double|ultra|secret|secreta|hyper|hiper|rainbow|gold|illustration|ilustracao)/.test(rarity) && !/(reverse|reversa)/.test(rarity);
       }
 
-      function resolveTwoVariantSlots(variants, source = {}) {
+      function resolvePhysicalVariantSlots(variants, source = {}) {
         const sourceVariants = {
           normal: Boolean(variants?.normal),
           holo: Boolean(variants?.holo),
           reverse: Boolean(variants?.reverse)
         };
+        const rarity = normalizeSearch(source.rarity || source.raw?.rarity || "");
+        if (/(double rare|rara dupla|raro duplo)/.test(rarity)) {
+          return { normal: false, holo: true, reverse: false };
+        }
+        if (/(common|uncommon|comum|incomum)/.test(rarity)) {
+          return { normal: true, holo: false, reverse: true };
+        }
+        if (/^(rare|rara|raro|rare holo|rara holo|raro holo)$/.test(rarity)) {
+          return { normal: false, holo: true, reverse: true };
+        }
+
+        const knownVariantCount = Object.values(sourceVariants).filter(Boolean).length;
+        const variantsKnown = source.variantsKnown !== false && Boolean(source.variants || source.raw?.variants);
+        if (variantsKnown && knownVariantCount > 0 && knownVariantCount <= 2) {
+          return sourceVariants;
+        }
+
         const primaryIsHolo = shouldUseHoloPrimary(source, sourceVariants);
         return primaryIsHolo
           ? { normal: false, holo: true, reverse: true }
@@ -3556,14 +3573,24 @@
         return `https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(productId)}_in_${dimensions}.jpg`;
       }
 
+      function getPokemonTcgCardImageUrl(card, size = "low") {
+        const setId = getPokemonTcgSetId(card?.setId);
+        const rawLocalId = String(card?.localId || "").trim();
+        if (!setId || !rawLocalId) return "";
+        const localId = /^\d+$/.test(rawLocalId) ? String(Number(rawLocalId)) : rawLocalId;
+        const suffix = size === "high" ? "_hires" : "";
+        return `https://images.pokemontcg.io/${encodeURIComponent(setId)}/${encodeURIComponent(localId)}${suffix}.png`;
+      }
+
       function getCardImageCandidates(card, size = "low") {
         if (!card) return [];
         const tcgplayer = getTcgplayerImageUrl(card, size);
-        if (tcgplayer) return [tcgplayer];
-        if (!TCGDEX_ASSET_HOST_ENABLED) return [];
+        const pokemonTcg = getPokemonTcgCardImageUrl(card, size);
+        const stable = Array.from(new Set([tcgplayer, pokemonTcg].filter(Boolean)));
+        if (!TCGDEX_ASSET_HOST_ENABLED) return stable;
         const direct = normalizeCardImageUrl(card.image, size);
         const alternateSize = size === "high" ? normalizeCardImageUrl(card.image, "low") : "";
-        return orderImageCandidates([direct, alternateSize]);
+        return Array.from(new Set([...stable, ...orderImageCandidates([direct, alternateSize])]));
       }
 
       function renderCardImage(card, size = "low", loading = "lazy") {
@@ -3661,10 +3688,10 @@
         return true;
       }
 
-      // Variant handling: each physical card resolves to exactly two slots:
-      // normal + reverse for regular cards, or holo + reverse for rare/special cards.
+      // Variant handling: common/uncommon cards use normal + reverse, rare cards use
+      // holo + reverse, and double rares use only holo. Other known TCGdex variants are preserved.
       function getVariantKeys(card) {
-        const variants = resolveTwoVariantSlots(card.variants || {}, card);
+        const variants = resolvePhysicalVariantSlots(card.variants || {}, card);
         return ["normal", "holo", "reverse"].filter((key) => variants[key]);
       }
 
