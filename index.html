@@ -3702,9 +3702,15 @@
         return state.collection.get(cardKey);
       }
 
-      function getTotalQuantity(cardKey) {
+      function getTotalQuantity(cardOrKey) {
+        const card = typeof cardOrKey === "string" ? findCard(cardOrKey) : cardOrKey;
+        const cardKey = typeof cardOrKey === "string" ? cardOrKey : cardOrKey?.key;
+        if (!cardKey) return 0;
         const entry = getCollection(cardKey);
-        return entry.normalQty + entry.holoQty + entry.reverseQty;
+        if (!card) {
+          return Number(entry.normalQty || 0) + Number(entry.holoQty || 0) + Number(entry.reverseQty || 0);
+        }
+        return getVariantKeys(card).reduce((total, variant) => total + Number(entry[`${variant}Qty`] || 0), 0);
       }
 
       async function updateVariantQuantity(cardKey, variant, delta) {
@@ -4727,7 +4733,7 @@
       function getRelevantQuantity(card, respectVariantFilters = true) {
         const entry = getCollection(card.key);
         if (!respectVariantFilters) {
-          return entry.normalQty + entry.holoQty + entry.reverseQty;
+          return getTotalQuantity(card);
         }
         return Array.from(state.variantFilters).reduce((sum, variant) => {
           if (!getVariantKeys(card).includes(variant)) return sum;
