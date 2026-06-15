@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Binder BR</title>
+  <title>POKE BINDER</title>
   <style>
     :root {
       color-scheme: dark;
@@ -2032,7 +2032,7 @@
       <div class="brand-row">
         <div class="brand-title">
           <span class="brand-mark" aria-hidden="true"></span>
-          <span>Binder BR</span>
+          <span>POKE BINDER</span>
         </div>
         <button id="closeSidebarBtn" class="mobile-close" type="button" aria-label="Close sets">Close</button>
       </div>
@@ -2497,7 +2497,7 @@
         } catch (error) {
           state.dbFailed = true;
           addNotice("IndexedDB is unavailable, so this session is using the embedded fallback plus in-memory changes.", "error");
-          console.warn("Binder BR IndexedDB fallback:", error);
+          console.warn("POKE BINDER IndexedDB fallback:", error);
         }
 
         startSyncFlow(false);
@@ -3096,8 +3096,10 @@
         }
         let added = 0;
         cards.forEach((card) => {
+          const collection = getCollection(card.key);
           variants.forEach((variant) => {
             if (!getVariantKeys(card).includes(variant)) return;
+            if (state.filter === "need" && Number(collection[`${variant}Qty`] || 0) > 0) return;
             addToCart(card.key, variant, { silent: true });
             added += 1;
           });
@@ -3593,8 +3595,8 @@
       }
 
       function getSetDisplayPriority(set) {
-        if (set?.lang === "pt-br") return 0;
-        if (set?.lang === "en") return 1;
+        if (set?.lang === "en") return 0;
+        if (set?.lang === "pt-br") return 1;
         return 2;
       }
 
@@ -3613,7 +3615,7 @@
         });
         return Array.from(families.entries()).map(([familyKey, sourceSets]) => {
           const ordered = [...sourceSets].sort((a, b) => getSetDisplayPriority(a) - getSetDisplayPriority(b));
-          const representative = ordered.find((set) => getCardsForExactSet(set.key).length > 0) || ordered[0];
+          const representative = ordered[0];
           const mostComplete = [...sourceSets].sort((a, b) =>
             getCardsForExactSet(b.key).length - getCardsForExactSet(a.key).length ||
             Number(b.cardCount || 0) - Number(a.cardCount || 0)
@@ -3642,7 +3644,7 @@
       }
 
       function mergeCardFamily(sourceCards) {
-        const languagePriority = new Map([["pt-br", 0], ["en", 1], ["ja", 2]]);
+        const languagePriority = new Map([["en", 0], ["pt-br", 1], ["ja", 2]]);
         const ordered = [...sourceCards].sort((a, b) => (languagePriority.get(a.lang) ?? 99) - (languagePriority.get(b.lang) ?? 99));
         const display = ordered[0];
         const detail = [...sourceCards].sort((a, b) =>
@@ -4420,7 +4422,7 @@
         els.setHero.innerHTML = `
           <div class="home-summary-card">
             <div class="home-summary-title">
-              <span>Binder BR Collection</span>
+              <span>POKE BINDER Collection</span>
             </div>
             <div class="home-kpis">
               <div class="home-kpi">
@@ -4817,10 +4819,7 @@
         return cards
           .filter((card) => {
             if (!matchesCardFilters(card)) return false;
-            const relevantQty = getRelevantQuantity(card);
-            if (state.filter === "have" && relevantQty === 0) return false;
-            if (state.filter === "need" && relevantQty !== 0) return false;
-            if (state.filter === "dupes" && relevantQty <= 1) return false;
+            if (!matchesOwnershipFilter(card, state.filter)) return false;
             if (!query) return true;
             const haystack = normalizeSearch([
               card.name,
@@ -4837,10 +4836,7 @@
         return cards
           .filter((card) => {
             if (!matchesCardFilters(card)) return false;
-            const relevantQty = getRelevantQuantity(card);
-            if (state.filter === "have" && relevantQty === 0) return false;
-            if (state.filter === "need" && relevantQty !== 0) return false;
-            if (state.filter === "dupes" && relevantQty <= 1) return false;
+            if (!matchesOwnershipFilter(card, state.filter)) return false;
             if (!query) return true;
             const set = state.sets.get(card.setKey);
             const haystack = normalizeSearch([
@@ -4964,13 +4960,14 @@
         const eligibleCards = options.respectVariantFilters ? cards.filter(matchesCardFilters) : cards;
         const totalCards = eligibleCards.length;
         let have = 0;
+        let need = 0;
         let dupes = 0;
         eligibleCards.forEach((card) => {
-          const totalQty = getRelevantQuantity(card, options.respectVariantFilters);
-          if (totalQty > 0) have += 1;
-          if (totalQty > 1) dupes += 1;
+          const ownership = getVariantOwnership(card, options.respectVariantFilters);
+          if (ownership.ownedVariants > 0) have += 1;
+          if (ownership.missingVariants > 0) need += 1;
+          if (ownership.totalQty > 1) dupes += 1;
         });
-        const need = Math.max(0, totalCards - have);
         const percent = totalCards ? Math.round((have / totalCards) * 100) : 0;
         return { totalCards, have, need, dupes, percent };
       }
@@ -5239,14 +5236,34 @@
       }
 
       function getRelevantQuantity(card, respectVariantFilters = true) {
+        return getVariantOwnership(card, respectVariantFilters).totalQty;
+      }
+
+      function getVariantOwnership(card, respectVariantFilters = true) {
         const entry = getCollection(card.key);
-        if (!respectVariantFilters) {
-          return getTotalQuantity(card);
-        }
-        return Array.from(state.variantFilters).reduce((sum, variant) => {
-          if (!getVariantKeys(card).includes(variant)) return sum;
-          return sum + Number(entry[`${variant}Qty`] || 0);
-        }, 0);
+        const supported = getVariantKeys(card);
+        const selected = respectVariantFilters
+          ? supported.filter((variant) => state.variantFilters.has(variant))
+          : supported;
+        return selected.reduce((result, variant) => {
+          const quantity = Number(entry[`${variant}Qty`] || 0);
+          result.totalQty += quantity;
+          if (quantity > 0) {
+            result.ownedVariants += 1;
+          } else {
+            result.missingVariants += 1;
+          }
+          return result;
+        }, { totalQty: 0, ownedVariants: 0, missingVariants: 0, selectedVariants: selected.length });
+      }
+
+      function matchesOwnershipFilter(card, filter = state.filter) {
+        if (filter === "all") return true;
+        const ownership = getVariantOwnership(card, true);
+        if (filter === "have") return ownership.ownedVariants > 0;
+        if (filter === "need") return ownership.missingVariants > 0;
+        if (filter === "dupes") return ownership.totalQty > 1;
+        return true;
       }
 
       function getCardPrice(card) {
@@ -5542,7 +5559,7 @@
             ${!supported ? `
               <div class="notice error">
                 <span>Google Drive cannot connect from a file:// page. Keep this page for local recovery, then open the HTTPS app to restore from Drive.</span>
-                <a href="${ONLINE_APP_URL}" target="_blank" rel="noopener noreferrer">Open online Binder BR</a>
+                <a href="${ONLINE_APP_URL}" target="_blank" rel="noopener noreferrer">Open POKE BINDER online</a>
               </div>
             ` : ""}
             <div class="cloud-actions">
@@ -5623,7 +5640,7 @@
 
       async function connectGoogleDrive() {
         if (!isCloudHostSupported()) {
-          state.cloud.error = "Open Binder BR from an HTTPS address before connecting Google Drive.";
+          state.cloud.error = "Open POKE BINDER from an HTTPS address before connecting Google Drive.";
           refreshCloudUi();
           return;
         }
@@ -5779,7 +5796,7 @@
 
       function buildCloudPayload() {
         return {
-          app: "Binder BR",
+          app: "POKE BINDER",
           version: 1,
           updatedAt: new Date().toISOString(),
           deviceId: state.cloud.deviceId,
@@ -5807,7 +5824,7 @@
             .map((entry) => ({ ...entry, updatedAt: entry.updatedAt || payloadUpdatedAt }))
         );
         return {
-          app: "Binder BR",
+          app: "POKE BINDER",
           version: 1,
           updatedAt: payloadUpdatedAt,
           deviceId: String(payload?.deviceId || ""),
@@ -5836,7 +5853,7 @@
         });
         const remoteCartWins = timestampValue(remote.cartUpdatedAt) > timestampValue(local.cartUpdatedAt);
         return {
-          app: "Binder BR",
+          app: "POKE BINDER",
           version: 1,
           updatedAt: new Date().toISOString(),
           deviceId: state.cloud.deviceId,
@@ -6299,7 +6316,7 @@
 
       async function exportBackup() {
         const backup = {
-          app: "Binder BR",
+          app: "POKE BINDER",
           version: 1,
           exportedAt: new Date().toISOString(),
           sets: state.db ? await idbGetAll("sets") : Array.from(state.sets.values()),
@@ -6311,7 +6328,7 @@
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `binder-br-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        a.download = `poke-binder-backup-${new Date().toISOString().slice(0, 10)}.json`;
         document.body.append(a);
         a.click();
         a.remove();
