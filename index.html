@@ -2133,6 +2133,8 @@
       const CLOUD_RECOVERY_META_KEY = "cloud-recovery-latest";
       const CLOUD_FILE_NAME = "binder-br-sync.json";
       const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+      const DEFAULT_GOOGLE_CLIENT_ID = "492172867864-3jrphcbv06suifhgpo2tfr0mabld50or.apps.googleusercontent.com";
+      const ONLINE_APP_URL = "https://derekbka2.github.io/binder-br/";
       const CLOUD_SYNC_DELAY_MS = 1600;
       const TCGDEX_ASSET_HOST_ENABLED = false;
       const CART_LIST_PAGE_SIZE = 110;
@@ -4881,7 +4883,7 @@
       function loadCloudConfig() {
         try {
           const saved = JSON.parse(localStorage.getItem(CLOUD_CONFIG_STORAGE_KEY) || "{}");
-          state.cloud.clientId = String(saved.clientId || "");
+          state.cloud.clientId = String(saved.clientId || DEFAULT_GOOGLE_CLIENT_ID);
           state.cloud.deviceId = String(saved.deviceId || "") || makeDeviceId();
           state.cloud.fileId = String(saved.fileId || "");
           state.cloud.lastSyncAt = String(saved.lastSyncAt || "");
@@ -4893,6 +4895,7 @@
           state.cloud.accessToken = String(session.accessToken || "");
           state.cloud.tokenExpiresAt = Number(session.tokenExpiresAt || 0);
         } catch (error) {
+          state.cloud.clientId = DEFAULT_GOOGLE_CLIENT_ID;
           state.cloud.deviceId = makeDeviceId();
           console.warn("Cloud settings load failed:", error);
         }
@@ -4996,10 +4999,17 @@
                 <span>No collection data exists at this browser address. If you previously used the file:// version, export its backup and import it here before syncing.</span>
               </div>
             ` : ""}
+            ${!supported ? `
+              <div class="notice error">
+                <span>Google Drive cannot connect from a file:// page. Keep this page for local recovery, then open the HTTPS app to restore from Drive.</span>
+                <a href="${ONLINE_APP_URL}" target="_blank" rel="noopener noreferrer">Open online Binder BR</a>
+              </div>
+            ` : ""}
             <div class="cloud-actions">
               <button type="button" data-cloud-action="save">Save Client ID</button>
               <button type="button" data-cloud-action="connect" ${!supported || state.cloud.status === "syncing" ? "disabled" : ""}>${connected ? "Reconnect" : "Connect Google Drive"}</button>
               <button type="button" data-cloud-action="sync" ${!connected || state.cloud.status === "syncing" ? "disabled" : ""}>Sync now</button>
+              <button type="button" data-cloud-action="restore-drive" ${!connected || state.cloud.status === "syncing" ? "disabled" : ""}>Restore from Drive</button>
               <button type="button" data-cloud-action="restore" ${!state.cloud.recoverySnapshot ? "disabled" : ""}>Restore local checkpoint</button>
               <button type="button" data-cloud-action="disconnect" ${!state.cloud.accessToken ? "disabled" : ""}>Disconnect</button>
             </div>
@@ -5029,6 +5039,10 @@
         }
         if (action === "sync") {
           await syncGoogleDrive();
+          return;
+        }
+        if (action === "restore-drive") {
+          await restoreFromGoogleDrive();
           return;
         }
         if (action === "restore") {
@@ -5246,15 +5260,20 @@
       }
 
       function normalizeCloudPayload(payload) {
+        const payloadUpdatedAt = String(payload?.updatedAt || "");
         return {
           app: "Binder BR",
           version: 1,
-          updatedAt: String(payload?.updatedAt || ""),
+          updatedAt: payloadUpdatedAt,
           deviceId: String(payload?.deviceId || ""),
           collectionResetAt: String(payload?.collectionResetAt || ""),
           cartUpdatedAt: String(payload?.cartUpdatedAt || ""),
-          collection: (Array.isArray(payload?.collection) ? payload.collection : []).filter((entry) => entry?.cardKey).map(normalizeCollection),
-          cart: (Array.isArray(payload?.cart) ? payload.cart : []).map(normalizeCartItem).filter(Boolean)
+          collection: (Array.isArray(payload?.collection) ? payload.collection : [])
+            .filter((entry) => entry?.cardKey)
+            .map((entry) => normalizeCollection({ ...entry, updatedAt: entry.updatedAt || payloadUpdatedAt })),
+          cart: (Array.isArray(payload?.cart) ? payload.cart : [])
+            .map((item) => normalizeCartItem({ ...item, updatedAt: item?.updatedAt || payloadUpdatedAt }))
+            .filter(Boolean)
         };
       }
 
@@ -5262,11 +5281,13 @@
         const local = normalizeCloudPayload(buildCloudPayload());
         const remote = normalizeCloudPayload(remotePayload || {});
         const resetAt = newestTimestamp(local.collectionResetAt, remote.collectionResetAt);
+        const resetTime = timestampValue(resetAt);
         const mergedCollection = new Map();
         [...local.collection, ...remote.collection].forEach((entry) => {
-          if (timestampValue(entry.updatedAt) <= timestampValue(resetAt)) return;
+          const entryTime = timestampValue(entry.updatedAt);
+          if (resetTime && entryTime <= resetTime) return;
           const current = mergedCollection.get(entry.cardKey);
-          if (!current || timestampValue(entry.updatedAt) >= timestampValue(current.updatedAt)) {
+          if (!current || entryTime >= timestampValue(current.updatedAt)) {
             mergedCollection.set(entry.cardKey, entry);
           }
         });
@@ -5319,6 +5340,43 @@
         scheduleCloudSync();
         addNotice("Local collection checkpoint restored.", "warn", 3500);
         refreshCloudUi();
+      }
+
+      async function restoreFromGoogleDrive() {
+        if (!hasCloudToken()) {
+          state.cloud.error = "Connect Google Drive before restoring.";
+          refreshCloudUi();
+          return;
+        }
+        if (hasCloudUserData(buildCloudPayload()) && !window.confirm("Replace this browser's collection with the saved Google Drive collection? A local checkpoint will be kept.")) {
+          return;
+        }
+        state.cloud.syncInFlight = true;
+        state.cloud.status = "syncing";
+        state.cloud.error = "";
+        refreshCloudUi();
+        try {
+          const fileId = await findCloudFile();
+          const remote = fileId ? normalizeCloudPayload(await downloadCloudPayload(fileId)) : null;
+          if (!remote || !hasCloudUserData(remote)) {
+            throw new Error("No saved collection was found in Google Drive.");
+          }
+          await saveCloudRecoverySnapshot(buildCloudPayload(), "Before restoring from Google Drive");
+          await applyCloudPayload(remote, { skipRecovery: true });
+          state.cloud.lastSyncAt = new Date().toISOString();
+          state.cloud.firstSyncComplete = true;
+          state.cloud.status = "connected";
+          persistCloudConfig();
+          addNotice("Collection restored from Google Drive.", "warn", 3500);
+        } catch (error) {
+          state.cloud.status = "error";
+          state.cloud.error = error.message || "Google Drive restore failed.";
+          addNotice("Google Drive restore failed. Local data was kept.", "error", 4500);
+          console.warn("Google Drive restore failed:", error);
+        } finally {
+          state.cloud.syncInFlight = false;
+          refreshCloudUi();
+        }
       }
 
       async function applyCloudPayload(payload, options = {}) {
