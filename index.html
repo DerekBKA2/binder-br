@@ -2040,11 +2040,6 @@
       <div class="sidebar-toolbar">
         <button id="trophyRoomBtn" class="nav-button" type="button">Trophy Room</button>
         <button id="homeBtn" class="home-button" type="button">HOME</button>
-        <div id="languageTabs" class="language-tabs sidebar-language-tabs" aria-label="Language tabs">
-          <button class="language-tab flag-tab" type="button" data-lang-jump="pt-br" title="Brazil" aria-label="Brazil Portuguese TCG">🇧🇷</button>
-          <button class="language-tab flag-tab" type="button" data-lang-jump="en" title="USA" aria-label="USA English TCG">🇺🇸</button>
-          <button class="language-tab flag-tab" type="button" data-lang-jump="ja" title="Japan" aria-label="Japan Japanese TCG">🇯🇵</button>
-        </div>
         <button id="syncNowBtn" type="button">Sync</button>
         <span id="syncPill" class="sync-pill">Fallback</span>
       </div>
@@ -2458,7 +2453,6 @@
         closeSidebarBtn: document.getElementById("closeSidebarBtn"),
         mobileSetsBtn: document.getElementById("mobileSetsBtn"),
         searchInput: document.getElementById("searchInput"),
-        languageTabs: document.getElementById("languageTabs"),
         noticeStack: document.getElementById("noticeStack"),
         setHero: document.getElementById("setHero"),
         controlBar: document.getElementById("controlBar"),
@@ -2527,12 +2521,6 @@
           state.query = event.target.value.trim();
           state.homePage = 1;
           renderAlbum();
-        });
-
-        els.languageTabs.addEventListener("click", (event) => {
-          const button = event.target.closest("[data-lang-jump]");
-          if (!button) return;
-          switchLanguage(button.dataset.langJump);
         });
 
         els.filterControls.addEventListener("click", (event) => {
@@ -2806,8 +2794,10 @@
 
       async function loadCardsForSelectedSetFromDb() {
         if (!state.db || !state.selectedSetKey) return;
-        const cards = await idbGetAllByIndex("cards", "setKey", state.selectedSetKey);
-        cards.forEach((card) => mergeCard(card, false));
+        const unifiedSet = getUnifiedSetByKey(state.selectedSetKey);
+        const setKeys = unifiedSet?.sourceSetKeys || [state.selectedSetKey];
+        const cardGroups = await Promise.all(setKeys.map((setKey) => idbGetAllByIndex("cards", "setKey", setKey)));
+        cardGroups.flat().forEach((card) => mergeCard(card, false));
       }
 
       function idbStore(storeName, mode = "readonly") {
@@ -2972,7 +2962,8 @@
       async function selectSet(setKey, options = {}) {
         if (!setKey || !state.sets.has(setKey)) return;
         const set = state.sets.get(setKey);
-        if (isConfirmedEmptySet(set)) {
+        const unifiedSet = getUnifiedSetByKey(setKey);
+        if (isConfirmedEmptySet(set) && !getCardsForSet(setKey).length) {
           addNotice(`${set.name} has no card data available in TCGdex yet.`, "warn", 3500);
           renderSidebar();
           return;
@@ -2994,11 +2985,12 @@
         }
 
         if (!options.skipFetch) {
-          fetchSetAndCardDetails(set).catch((error) => {
-            addNotice(`Could not load ${set.name} cards from TCGdex. Cached cards remain visible.`, "error");
-            console.warn("Selected set load failed:", error);
-            state.loadingSets.delete(setKey);
-            renderAlbum();
+          const sources = unifiedSet?.sourceSets || [set];
+          Promise.allSettled(sources.map((sourceSet) => fetchSetAndCardDetails(sourceSet))).then((results) => {
+            if (results.every((result) => result.status === "rejected")) {
+              addNotice(`Could not load ${set.name} cards from TCGdex. Cached cards remain visible.`, "error");
+            }
+            renderAll();
           });
         }
       }
@@ -3014,11 +3006,9 @@
       function selectSeriesPage(seriesKey) {
         const parsed = parseSeriesPageKey(seriesKey);
         if (!parsed) return;
-        state.selectedSetKey = makeSeriesPageKey(parsed.lang, parsed.seriesId);
-        state.activeLang = parsed.lang;
+        state.selectedSetKey = makeSeriesPageKey("all", parsed.seriesId);
         state.missingSet = null;
-        state.expandedLangs.add(parsed.lang);
-        state.expandedSeries.add(`${parsed.lang}:${parsed.seriesId}`);
+        state.expandedSeries.add(`all:${parsed.seriesId}`);
         setSidebarOpen(false);
         renderAll();
       }
@@ -3598,12 +3588,97 @@
         return state.cardsBySet.get(setKey);
       }
 
-      function getCardsForSet(setKey) {
+      function getCardsForExactSet(setKey) {
         return Array.from((state.cardsBySet.get(setKey) || new Map()).values());
       }
 
+      function getSetDisplayPriority(set) {
+        if (set?.lang === "pt-br") return 0;
+        if (set?.lang === "en") return 1;
+        return 2;
+      }
+
+      function getSetFamilyKey(set) {
+        if (!set) return "";
+        return getCanonicalCollectionSetId(set.lang, set.id);
+      }
+
+      function getUnifiedSets() {
+        const families = new Map();
+        Array.from(state.sets.values()).forEach((set) => {
+          const familyKey = getSetFamilyKey(set);
+          if (!familyKey) return;
+          if (!families.has(familyKey)) families.set(familyKey, []);
+          families.get(familyKey).push(set);
+        });
+        return Array.from(families.entries()).map(([familyKey, sourceSets]) => {
+          const ordered = [...sourceSets].sort((a, b) => getSetDisplayPriority(a) - getSetDisplayPriority(b));
+          const representative = ordered.find((set) => getCardsForExactSet(set.key).length > 0) || ordered[0];
+          const mostComplete = [...sourceSets].sort((a, b) =>
+            getCardsForExactSet(b.key).length - getCardsForExactSet(a.key).length ||
+            Number(b.cardCount || 0) - Number(a.cardCount || 0)
+          )[0];
+          return {
+            ...mostComplete,
+            ...representative,
+            key: representative.key,
+            familyKey,
+            sourceSets,
+            sourceSetKeys: sourceSets.map((set) => set.key),
+            cardCount: Math.max(...sourceSets.map((set) => Number(set.cardCount || 0)), 0),
+            officialCardCount: Math.max(...sourceSets.map((set) => Number(set.officialCardCount || 0)), 0),
+            releaseDate: representative.releaseDate || mostComplete.releaseDate || "",
+            logo: representative.logo || mostComplete.logo || "",
+            symbol: representative.symbol || mostComplete.symbol || ""
+          };
+        });
+      }
+
+      function getUnifiedSetByKey(setKey) {
+        const sourceSet = state.sets.get(setKey);
+        if (!sourceSet) return null;
+        const familyKey = getSetFamilyKey(sourceSet);
+        return getUnifiedSets().find((set) => set.familyKey === familyKey) || sourceSet;
+      }
+
+      function mergeCardFamily(sourceCards) {
+        const languagePriority = new Map([["pt-br", 0], ["en", 1], ["ja", 2]]);
+        const ordered = [...sourceCards].sort((a, b) => (languagePriority.get(a.lang) ?? 99) - (languagePriority.get(b.lang) ?? 99));
+        const display = ordered[0];
+        const detail = [...sourceCards].sort((a, b) =>
+          Number(Boolean(b.variantsKnown)) - Number(Boolean(a.variantsKnown)) ||
+          getCardRawDetailScore(b.raw) - getCardRawDetailScore(a.raw)
+        )[0];
+        return {
+          ...detail,
+          ...display,
+          image: display.image || detail.image || "",
+          rarity: display.rarity || detail.rarity || "",
+          category: display.category || detail.category || "",
+          types: display.types?.length ? display.types : detail.types,
+          variants: detail.variants || display.variants,
+          variantsKnown: Boolean(detail.variantsKnown || display.variantsKnown),
+          raw: getCardRawDetailScore(detail.raw) >= getCardRawDetailScore(display.raw) ? detail.raw : display.raw,
+          sourceCards
+        };
+      }
+
+      function getCardsForSet(setKey) {
+        const unifiedSet = getUnifiedSetByKey(setKey);
+        if (!unifiedSet) return getCardsForExactSet(setKey);
+        const cards = new Map();
+        (unifiedSet.sourceSetKeys || [setKey]).forEach((sourceSetKey) => {
+          getCardsForExactSet(sourceSetKey).forEach((card) => {
+            const sharedKey = resolveSharedCollectionKey(card);
+            if (!cards.has(sharedKey)) cards.set(sharedKey, []);
+            cards.get(sharedKey).push(card);
+          });
+        });
+        return Array.from(cards.values()).map(mergeCardFamily);
+      }
+
       function isConfirmedEmptySet(set) {
-        return Boolean(set?.cardsLoadedAt && !getCardsForSet(set.key).length && !state.loadingSets.has(set.key));
+        return Boolean(set?.cardsLoadedAt && !getCardsForExactSet(set.key).length && !state.loadingSets.has(set.key));
       }
 
       function isSetVisibleInLibrary(set) {
@@ -3616,18 +3691,13 @@
       }
 
       function getHomeCards() {
-        const languagePriority = [state.activeLang, "en", "pt-br", "ja"]
-          .filter((lang, index, values) => values.indexOf(lang) === index);
-        const rank = new Map(languagePriority.map((lang, index) => [lang, index]));
         const cards = new Map();
         getAllCards().forEach((card) => {
           const sharedKey = resolveSharedCollectionKey(card);
-          const current = cards.get(sharedKey);
-          if (!current || (rank.get(card.lang) ?? 99) < (rank.get(current.lang) ?? 99)) {
-            cards.set(sharedKey, card);
-          }
+          if (!cards.has(sharedKey)) cards.set(sharedKey, []);
+          cards.get(sharedKey).push(card);
         });
-        return Array.from(cards.values());
+        return Array.from(cards.values()).map(mergeCardFamily);
       }
 
       function getActiveCards() {
@@ -4202,6 +4272,8 @@
           const persistedCollection = Array.from(state.collection.values()).filter(isCollectionEntryMeaningful);
           await idbClear("collection");
           await idbPutMany("collection", persistedCollection);
+          state.filter = "all";
+          state.homePage = 1;
           renderAll();
           scheduleCloudSync();
           const skippedText = skippedQuantity ? ` ${skippedQuantity} could not be matched.` : "";
@@ -4235,13 +4307,10 @@
         renderSidebarTrophySummary();
         els.trophyRoomBtn.classList.toggle("active", state.selectedSetKey === "trophies");
         els.homeBtn.classList.toggle("active", state.selectedSetKey === "home");
-        els.languageTabs.querySelectorAll("[data-lang-jump]").forEach((button) => {
-          button.classList.toggle("active", button.dataset.langJump === state.activeLang);
-        });
-        const groups = getGroupedSets(state.activeLang);
+        const groups = getGroupedSets();
         const html = groups.length
-          ? groups.map((group, index) => renderSeriesGroup(state.activeLang, group, index)).join("")
-          : `<div class="empty-state">No sets loaded for ${escapeHtml(LANGUAGES[state.activeLang]?.short || state.activeLang)}.</div>`;
+          ? groups.map((group, index) => renderSeriesGroup("all", group, index)).join("")
+          : `<div class="empty-state">No sets loaded.</div>`;
         els.languageTree.innerHTML = html;
       }
 
@@ -4262,12 +4331,12 @@
       }
 
       function renderSeriesGroup(lang, group, index) {
-        const seriesStateKey = `${lang}:${group.seriesId || slugify(group.series)}`;
-        const pageKey = makeSeriesPageKey(lang, group.seriesId || slugify(group.series));
+        const seriesStateKey = `all:${group.seriesId || slugify(group.series)}`;
+        const pageKey = makeSeriesPageKey("all", group.seriesId || slugify(group.series));
         const isOpen = state.expandedSeries.has(seriesStateKey);
         const isActive = state.selectedSetKey === pageKey;
         const setsHtml = isOpen ? group.sets.map((set) => `
-          <button class="set-row ${set.key === state.selectedSetKey ? "active" : ""}" type="button" data-set-key="${escapeAttr(set.key)}" title="${escapeAttr(set.name)}">
+          <button class="set-row ${getSetFamilyKey(set) === getSetFamilyKey(state.sets.get(state.selectedSetKey)) ? "active" : ""}" type="button" data-set-key="${escapeAttr(set.key)}" title="${escapeAttr(set.name)}">
             <span></span>
             <span class="tree-label">${escapeHtml(set.name)}</span>
             <span class="tree-count">${escapeHtml(displayYear(set.releaseDate))}</span>
@@ -4308,7 +4377,7 @@
           renderSeriesHero();
           return;
         }
-        const set = state.sets.get(state.selectedSetKey);
+        const set = getUnifiedSetByKey(state.selectedSetKey);
         if (!set) {
           els.setHero.innerHTML = "";
           els.setHero.hidden = true;
@@ -4317,7 +4386,7 @@
         const cards = getCardsForSet(set.key);
         const trophy = getSetTrophy(set, cards);
         const countLabel = `${trophy.baseTotal} base + ${trophy.secretTotal} secret`;
-        const seriesPageKey = makeSeriesPageKey(set.lang, set.seriesId || slugify(set.series || "Other"));
+        const seriesPageKey = makeSeriesPageKey("all", set.seriesId || slugify(set.series || "Other"));
         els.setHero.innerHTML = `
           <div class="set-title-row">
             <div class="set-mark">
@@ -4329,7 +4398,6 @@
                 <button class="series-inline-link" type="button" data-series-open="${escapeAttr(seriesPageKey)}">${escapeHtml(set.series || "Other")}</button>
                 <span>${escapeHtml(formatDate(set.releaseDate))}</span>
                 <span>${escapeHtml(countLabel)}</span>
-                <span>${escapeHtml(formatLanguageLabel(set.lang))}</span>
                 <a class="liga-link" href="${escapeAttr(buildLigaPokemonSetUrl(set))}" target="_blank" rel="noopener noreferrer">Liga set</a>
               </div>
               ${renderTrophyBand(trophy)}
@@ -4394,7 +4462,6 @@
             <div class="set-heading">
               <h1>${escapeHtml(context.series)}</h1>
               <div class="set-meta">
-                <span>${escapeHtml(LANGUAGES[context.lang]?.label || context.lang)}</span>
                 <span>${context.sets.length} sets</span>
                 <span>${context.cards.length} cards loaded</span>
               </div>
@@ -4410,6 +4477,15 @@
         }
         const cards = getActiveCards();
         const counts = getSetCounts(cards, { respectVariantFilters: true });
+        const availableByFilter = {
+          all: counts.totalCards,
+          have: counts.have,
+          need: counts.need,
+          dupes: counts.dupes
+        };
+        if (state.filter !== "all" && !availableByFilter[state.filter]) {
+          state.filter = "all";
+        }
         const variantCounts = getVariantSupportCounts(cards);
         const secretCount = getSecretSupportCount(cards);
         const filters = [
@@ -4419,7 +4495,7 @@
           ["dupes", `Dupes (${counts.dupes})`]
         ];
         els.filterControls.innerHTML = filters.map(([value, label]) => `
-          <button type="button" data-filter="${value}" class="${state.filter === value ? "active" : ""}">${escapeHtml(label)}</button>
+          <button type="button" data-filter="${value}" class="${state.filter === value ? "active" : ""}" ${value !== "all" && !availableByFilter[value] ? "disabled" : ""}>${escapeHtml(label)}</button>
         `).join("");
         els.variantControls.innerHTML = ["normal", "holo", "reverse"].map((variant) => `
           <button type="button"
@@ -4440,14 +4516,10 @@
         els.viewControls.querySelectorAll("[data-view]").forEach((button) => {
           button.classList.toggle("active", button.dataset.view === state.view);
         });
-        const activeLang = state.selectedSetKey === "home" || state.selectedSetKey === "trophies" || isMissingSetPageKey(state.selectedSetKey) ? state.activeLang : state.sets.get(state.selectedSetKey)?.lang;
-        els.languageTabs.querySelectorAll("[data-lang-jump]").forEach((button) => {
-          button.classList.toggle("active", button.dataset.langJump === activeLang);
-        });
       }
 
       function renderAlbum() {
-        const set = state.selectedSetKey === "home" || state.selectedSetKey === "trophies" || isMissingSetPageKey(state.selectedSetKey) ? null : state.sets.get(state.selectedSetKey);
+        const set = state.selectedSetKey === "home" || state.selectedSetKey === "trophies" || isMissingSetPageKey(state.selectedSetKey) ? null : getUnifiedSetByKey(state.selectedSetKey);
         if (state.selectedSetKey === "home") {
           renderHomeAlbum();
           return;
@@ -4808,23 +4880,30 @@
         return naturalCompare(a.localId, b.localId);
       }
 
-      function getGroupedSets(lang) {
-        const sets = Array.from(state.sets.values()).filter((set) => set.lang === lang && isSetVisibleInLibrary(set));
+      function getGroupedSets() {
+        const sets = getUnifiedSets().filter((set) =>
+          (set.sourceSets || [set]).some((sourceSet) => isSetVisibleInLibrary(sourceSet))
+        );
         const bySeries = new Map();
         sets.forEach((set) => {
           const series = set.series || "Other";
           const seriesId = set.seriesId || slugify(series);
-          const key = `${seriesId}:${series}`;
+          const key = String(seriesId);
           if (!bySeries.has(key)) {
             bySeries.set(key, {
               series,
               seriesId,
+              displayPriority: getSetDisplayPriority(set),
               rank: getSeriesRank(seriesId, series),
               newest: 0,
               sets: []
             });
           }
           const group = bySeries.get(key);
+          if (getSetDisplayPriority(set) < group.displayPriority) {
+            group.series = series;
+            group.displayPriority = getSetDisplayPriority(set);
+          }
           group.sets.push(set);
           group.rank = Math.max(group.rank || 0, getSeriesRank(seriesId, series));
           group.newest = Math.max(group.newest, dateValue(set.releaseDate), Number(set.tcgdexOrder || 0));
@@ -4855,12 +4934,12 @@
       function getSelectedSeriesContext() {
         const parsed = parseSeriesPageKey(state.selectedSetKey);
         if (!parsed) return null;
-        const groups = getGroupedSets(parsed.lang);
+        const groups = getGroupedSets();
         const group = groups.find((item) => String(item.seriesId || slugify(item.series)) === String(parsed.seriesId));
         if (!group) return null;
         const cards = group.sets.flatMap((set) => getCardsForSet(set.key));
         return {
-          lang: parsed.lang,
+          lang: "all",
           series: group.series,
           seriesId: group.seriesId,
           sets: group.sets,
@@ -5081,8 +5160,7 @@
       }
 
       function getTrophyItems() {
-        return Array.from(state.sets.values())
-          .filter((set) => set.lang === state.activeLang)
+        return getUnifiedSets()
           .filter(isTrophyEligibleSet)
           .filter((set) => getCardsForSet(set.key).length > 0)
           .map((set) => ({ set, trophy: getSetTrophy(set, getCardsForSet(set.key)) }))
@@ -5091,24 +5169,28 @@
 
       function getTrophyRoomGroups() {
         const bySeries = new Map();
-        Array.from(state.sets.values())
-          .filter((set) => set.lang === state.activeLang)
+        getUnifiedSets()
           .filter(isTrophyEligibleSet)
           .filter((set) => getCardsForSet(set.key).length > 0)
           .forEach((set) => {
           const series = set.series || "Other";
           const seriesId = set.seriesId || slugify(series);
-          const key = `${seriesId}:${series}`;
+          const key = String(seriesId);
           if (!bySeries.has(key)) {
             bySeries.set(key, {
               series,
               seriesId,
+              displayPriority: getSetDisplayPriority(set),
               rank: getSeriesRank(seriesId, series),
               newest: 0,
               sets: []
             });
           }
           const group = bySeries.get(key);
+          if (getSetDisplayPriority(set) < group.displayPriority) {
+            group.series = series;
+            group.displayPriority = getSetDisplayPriority(set);
+          }
           group.newest = Math.max(group.newest, dateValue(set.releaseDate), Number(set.tcgdexOrder || 0));
           group.sets.push({ set, trophy: getSetTrophy(set, getCardsForSet(set.key)) });
         });
@@ -5270,8 +5352,7 @@
       function ensureExpandedForSelectedSet() {
         const set = state.sets.get(state.selectedSetKey);
         if (!set) return;
-        state.expandedLangs.add(set.lang);
-        state.expandedSeries.add(`${set.lang}:${set.seriesId || slugify(set.series || "Other")}`);
+        state.expandedSeries.add(`all:${set.seriesId || slugify(set.series || "Other")}`);
       }
 
       function setSidebarOpen(isOpen) {
@@ -6271,6 +6352,8 @@
             idbPutMany("cards", cards),
             idbPutMany("collection", normalizedCollection)
           ]);
+          state.filter = "all";
+          state.homePage = 1;
           persistCloudConfig();
           renderAll();
           closeImportPanel();
