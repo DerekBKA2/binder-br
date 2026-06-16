@@ -1206,8 +1206,10 @@
       display: none;
       position: absolute;
       inset: 0;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 8px;
       padding: 12px;
       text-align: center;
       color: #7d8795;
@@ -1215,6 +1217,29 @@
         linear-gradient(135deg, rgba(255, 255, 255, 0.06), transparent 40%),
         #111722;
       font-size: 13px;
+    }
+
+    .image-placeholder strong {
+      max-width: 100%;
+      color: #dbe4ef;
+      font-size: 15px;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+
+    .image-placeholder span {
+      color: #38bdf8;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+    }
+
+    .image-placeholder small {
+      color: #7d8795;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
     }
 
     .card-image-shell.image-missing .image-placeholder {
@@ -3803,7 +3828,7 @@
       }
 
       function getPokemonTcgCardImageUrl(card, size = "low") {
-        const setId = getPokemonTcgSetId(card?.setId);
+        const setId = getPokemonTcgCardSetId(card?.setId);
         const rawLocalId = String(card?.localId || "").trim();
         if (!setId || !rawLocalId) return "";
         const localId = /^\d+$/.test(rawLocalId) ? String(Number(rawLocalId)) : rawLocalId;
@@ -3816,10 +3841,10 @@
         const tcgplayer = getTcgplayerImageUrl(card, size);
         const pokemonTcg = getPokemonTcgCardImageUrl(card, size);
         const stable = Array.from(new Set([tcgplayer, pokemonTcg].filter(Boolean)));
-        if (!TCGDEX_ASSET_HOST_ENABLED) return stable;
         const direct = normalizeCardImageUrl(card.image, size);
         const alternateSize = size === "high" ? normalizeCardImageUrl(card.image, "low") : "";
-        return Array.from(new Set([...stable, ...orderImageCandidates([direct, alternateSize])]));
+        const tcgdex = orderImageCandidates([direct, alternateSize], { includeWhenAssetHostDisabled: true });
+        return Array.from(new Set([...stable, ...tcgdex]));
       }
 
       function renderCardImage(card, size = "low", loading = "lazy") {
@@ -3851,6 +3876,15 @@
         if (exact[id]) return exact[id];
         if (/[a-z]\d+[a-z]$/.test(id)) return "";
         return id.replace(/^([a-z]+)0+(\d)/, "$1$2").replace(/\.(\d+)$/, "pt$1");
+      }
+
+      function getPokemonTcgCardSetId(setId) {
+        const id = String(setId || "").trim().toLowerCase();
+        const promoSets = new Set(["bwp", "xyp", "smp", "swshp", "svp"]);
+        if (promoSets.has(id)) return id;
+        const mapped = getPokemonTcgSetId(id);
+        if (!mapped) return "";
+        return /\d/.test(mapped) || mapped === "pgo" || mapped === "cel25" ? mapped : "";
       }
 
       function getSetAssetCandidates(set) {
@@ -4754,7 +4788,11 @@
           <article class="card-tile ${ownedClass} ${dupeClass}" data-card-key="${escapeAttr(card.key)}">
             <div class="card-image-shell ${cardImage ? "" : "image-missing"}">
               ${cardImage}
-              <div class="image-placeholder">No image</div>
+              <div class="image-placeholder">
+                <span>#${escapeHtml(card.localId || "?")}</span>
+                <strong>${escapeHtml(card.name)}</strong>
+                <small>Image unavailable</small>
+              </div>
               <div class="variant-stack">${variantButtons}</div>
             </div>
             <div class="card-body">
