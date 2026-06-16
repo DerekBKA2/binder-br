@@ -4479,15 +4479,6 @@
         }
         const cards = getActiveCards();
         const counts = getSetCounts(cards, { respectVariantFilters: true });
-        const availableByFilter = {
-          all: counts.totalCards,
-          have: counts.have,
-          need: counts.need,
-          dupes: counts.dupes
-        };
-        if (state.filter !== "all" && !availableByFilter[state.filter]) {
-          state.filter = "all";
-        }
         const variantCounts = getVariantSupportCounts(cards);
         const secretCount = getSecretSupportCount(cards);
         const filters = [
@@ -4497,7 +4488,7 @@
           ["dupes", `Dupes (${counts.dupes})`]
         ];
         els.filterControls.innerHTML = filters.map(([value, label]) => `
-          <button type="button" data-filter="${value}" class="${state.filter === value ? "active" : ""}" ${value !== "all" && !availableByFilter[value] ? "disabled" : ""}>${escapeHtml(label)}</button>
+          <button type="button" data-filter="${value}" class="${state.filter === value ? "active" : ""}">${escapeHtml(label)}</button>
         `).join("");
         els.variantControls.innerHTML = ["normal", "holo", "reverse"].map((variant) => `
           <button type="button"
