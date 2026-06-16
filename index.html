@@ -1020,6 +1020,32 @@
       display: block;
     }
 
+    .set-code-badge {
+      min-width: 42px;
+      max-width: 112px;
+      min-height: 26px;
+      display: inline-grid;
+      place-items: center;
+      padding: 5px 8px;
+      border-radius: 7px;
+      border: 1px solid rgba(148, 163, 184, 0.34);
+      background: rgba(15, 23, 42, 0.72);
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 900;
+      line-height: 1;
+      text-transform: uppercase;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+
+    .trophy-slot-logo.image-missing,
+    .series-set-logo.image-missing,
+    .shelf-logo.image-missing {
+      color: #cbd5e1;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+    }
+
     .trophy-slot-date {
       color: #7d8795;
       font-size: 11px;
@@ -2162,6 +2188,24 @@
         "pt-br:me03": { edid: "769", ed: "POR", name: "Equilibrio Perfeito" }
       };
       const SET_LOGO_FALLBACKS = {
+        "en:swsh3.5": [
+          "https://images.pokemontcg.io/swsh35/logo.png"
+        ],
+        "en:swsh4.5": [
+          "https://images.pokemontcg.io/swsh45/logo.png"
+        ],
+        "en:swsh10.5": [
+          "https://images.pokemontcg.io/pgo/logo.png"
+        ],
+        "en:swsh12.5": [
+          "https://images.pokemontcg.io/swsh12pt5/logo.png"
+        ],
+        "en:sv10.5b": [
+          "https://images.pokemontcg.io/rsv10pt5/logo.png"
+        ],
+        "en:sv10.5w": [
+          "https://images.pokemontcg.io/rsv10pt5/logo.png"
+        ],
         "pt-br:sv08": [
           "https://images.pokemontcg.io/sv8/logo.png"
         ],
@@ -3732,8 +3776,8 @@
         return `https://images.weserv.nl/?url=${encodeURIComponent(url)}&output=webp`;
       }
 
-      function orderImageCandidates(urls) {
-        if (!TCGDEX_ASSET_HOST_ENABLED) return [];
+      function orderImageCandidates(urls, options = {}) {
+        if (!TCGDEX_ASSET_HOST_ENABLED && !options.includeWhenAssetHostDisabled) return [];
         const direct = Array.from(new Set(urls.filter(Boolean)));
         const proxied = direct.map(makeImageProxyUrl).filter(Boolean);
         const published = location.hostname.endsWith("github.io");
@@ -3793,18 +3837,26 @@
         if (!id) return "";
         const exact = {
           "me02.5": "me2pt5",
+          "swsh3.5": "swsh35",
+          "swsh4.5": "swsh45",
+          "swsh10.5": "pgo",
+          "swsh12.5": "swsh12pt5",
+          "sv10.5b": "rsv10pt5",
+          "sv10.5w": "rsv10pt5",
           "sv03.5": "sv3pt5",
           "sv04.5": "sv4pt5",
           "sv06.5": "sv6pt5",
           "sv08.5": "sv8pt5"
         };
         if (exact[id]) return exact[id];
+        if (/[a-z]\d+[a-z]$/.test(id)) return "";
         return id.replace(/^([a-z]+)0+(\d)/, "$1$2").replace(/\.(\d+)$/, "pt$1");
       }
 
       function getSetAssetCandidates(set) {
         if (!set) return [];
-        const stableValues = [];
+        const customValues = [];
+        const pokemonTcgValues = [];
         const tcgdexValues = [];
         const addTo = (target, value) => {
           if (Array.isArray(value)) {
@@ -3819,10 +3871,10 @@
 
         // Set logos use independent fallbacks so disabling a broken TCGdex asset host
         // never removes logos from headers, series pages, or the trophy room.
-        addTo(stableValues, PKMN_GG_SET_LOGOS[normalizedSetId]);
-        addTo(stableValues, getNamedLogoFallbacks(set));
+        addTo(customValues, PKMN_GG_SET_LOGOS[normalizedSetId]);
+        addTo(pokemonTcgValues, getNamedLogoFallbacks(set));
         if (pokemonTcgSetId) {
-          addTo(stableValues, `https://images.pokemontcg.io/${pokemonTcgSetId}/logo.png`);
+          addTo(pokemonTcgValues, `https://images.pokemontcg.io/${pokemonTcgSetId}/logo.png`);
         }
 
         addTo(tcgdexValues, set.logo);
@@ -3832,13 +3884,12 @@
             addTo(tcgdexValues, `https://assets.tcgdex.net/en/${seriesId}/${set.id}/logo`);
           }
         }
-        addTo(tcgdexValues, set.symbol);
-        if (seriesId && set.id) {
-          addTo(tcgdexValues, `https://assets.tcgdex.net/univ/${seriesId}/${set.id}/symbol`);
-        }
-        const stable = stableValues.map(normalizeSetAssetUrl).filter(Boolean);
-        const tcgdex = orderImageCandidates(tcgdexValues.map(normalizeSetAssetUrl).filter(Boolean));
-        return Array.from(new Set([...stable, ...tcgdex]));
+        const custom = customValues.map(normalizeSetAssetUrl).filter(Boolean);
+        const tcgdex = orderImageCandidates(tcgdexValues.map(normalizeSetAssetUrl).filter(Boolean), {
+          includeWhenAssetHostDisabled: true
+        });
+        const pokemonTcg = pokemonTcgValues.map(normalizeSetAssetUrl).filter(Boolean);
+        return Array.from(new Set([...custom, ...tcgdex, ...pokemonTcg]));
       }
 
       function getNamedLogoFallbacks(set) {
@@ -3851,15 +3902,27 @@
 
       function renderSetLogoImage(set, altText = "", loading = "") {
         const candidates = getSetAssetCandidates(set);
-        const fallbackText = (set?.name || "??").slice(0, 2).toUpperCase();
+        const fallbackText = getSetFallbackText(set);
         if (!candidates.length) {
-          return `<span>${escapeHtml(fallbackText)}</span>`;
+          return `<span class="set-code-badge">${escapeHtml(fallbackText)}</span>`;
         }
         const fallbackAttr = candidates.length > 1
           ? ` data-fallback-srcs="${escapeAttr(candidates.slice(1).join("|"))}"`
           : "";
         const loadingAttr = loading ? ` loading="${escapeAttr(loading)}"` : "";
         return `<img src="${escapeAttr(candidates[0])}" alt="${escapeAttr(altText)}" referrerpolicy="no-referrer"${loadingAttr}${fallbackAttr} data-logo-text="${escapeAttr(fallbackText)}">`;
+      }
+
+      function getSetFallbackText(set) {
+        const id = String(set?.id || "").replace(/[^a-z0-9]+/gi, "").toUpperCase();
+        if (id) return id.slice(0, 8);
+        const initials = String(set?.name || "")
+          .split(/\s+/)
+          .map((part) => part[0])
+          .filter(Boolean)
+          .join("")
+          .toUpperCase();
+        return (initials || "SET").slice(0, 6);
       }
 
       function tryNextImageFallback(img) {
