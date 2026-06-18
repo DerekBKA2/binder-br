@@ -4114,11 +4114,13 @@
       }
 
       async function fetchPublicPkmnResource(url, responseType = "json") {
+        const cacheSeparator = String(url).includes("?") ? "&" : "?";
+        const freshUrl = `${url}${cacheSeparator}_pokeBinder=${Date.now()}`;
         const relays = [
-          url,
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-          `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-          `https://cors.isomorphic-git.org/${url}`
+          freshUrl,
+          `https://api.allorigins.win/raw?url=${encodeURIComponent(freshUrl)}`,
+          `https://corsproxy.io/?url=${encodeURIComponent(freshUrl)}`,
+          `https://cors.isomorphic-git.org/${freshUrl}`
         ];
         let lastError = null;
         for (const requestUrl of relays) {
@@ -4127,6 +4129,7 @@
           try {
             const response = await fetch(requestUrl, {
               signal: controller.signal,
+              cache: "no-store",
               headers: { Accept: responseType === "json" ? "application/json" : "text/html,application/xhtml+xml" }
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -4175,6 +4178,12 @@
         if (value.includes("holo")) return "holoQty";
         if (value.includes("normal") || value.includes("1stedition") || value === "unlimited") return "normalQty";
         return "";
+      }
+
+      function getPkmnRecordQuantity(record) {
+        const raw = record?.quantity ?? record?.qty ?? record?.count ?? 1;
+        const quantity = Number(raw);
+        return Number.isFinite(quantity) ? Math.max(0, quantity) : 0;
       }
 
       function getPkmnSetIdForCard(cardId, setIds) {
@@ -4308,7 +4317,7 @@
             const pkmnSetId = getPkmnSetIdForCard(pkmnCardId, sortedPkmnSetIds);
             const mapping = detailedBySet.get(pkmnSetId);
             if (!mapping) {
-              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + Number(record?.quantity || 0), 0);
+              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
               return;
             }
             const localId = pkmnCardId.slice(pkmnSetId.length + 1);
@@ -4324,13 +4333,13 @@
               }
             }
             if (!tcgdexCard) {
-              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + Number(record?.quantity || 0), 0);
+              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
               return;
             }
             const sharedKey = resolveSharedCollectionKey(tcgdexCard);
             if (!imported.has(sharedKey)) imported.set(sharedKey, { normalQty: 0, holoQty: 0, reverseQty: 0 });
             (Array.isArray(records) ? records : [records]).forEach((record) => {
-              const quantity = Math.max(0, Number(record?.quantity || 0));
+              const quantity = getPkmnRecordQuantity(record);
               const field = getPkmnVariantField(record?.variant);
               if (!field) {
                 skippedQuantity += quantity;
@@ -4769,7 +4778,7 @@
         const collection = getCollection(card.key);
         const totalQty = getTotalQuantity(card.key);
         const ownedClass = totalQty > 0 ? "owned" : "missing";
-        const dupeClass = totalQty > 1 ? "duplicate" : "";
+        const dupeClass = hasDuplicateVariant(card, false) ? "duplicate" : "";
         const cardImage = renderCardImage(card, "low", "lazy");
         const variants = getVariantKeys(card);
         const variantButtons = variants.map((variant) => {
@@ -5058,7 +5067,7 @@
           const ownership = getVariantOwnership(card, options.respectVariantFilters);
           if (ownership.ownedVariants > 0) have += 1;
           if (ownership.missingVariants > 0) need += 1;
-          if (ownership.totalQty > 1) dupes += 1;
+          if (ownership.duplicateVariants > 0) dupes += 1;
         });
         const percent = totalCards ? Math.round((have / totalCards) * 100) : 0;
         return { totalCards, have, need, dupes, percent };
@@ -5345,8 +5354,13 @@
           } else {
             result.missingVariants += 1;
           }
+          if (quantity > 1) result.duplicateVariants += 1;
           return result;
-        }, { totalQty: 0, ownedVariants: 0, missingVariants: 0, selectedVariants: selected.length });
+        }, { totalQty: 0, ownedVariants: 0, missingVariants: 0, duplicateVariants: 0, selectedVariants: selected.length });
+      }
+
+      function hasDuplicateVariant(card, respectVariantFilters = true) {
+        return getVariantOwnership(card, respectVariantFilters).duplicateVariants > 0;
       }
 
       function matchesOwnershipFilter(card, filter = state.filter) {
@@ -5354,7 +5368,7 @@
         const ownership = getVariantOwnership(card, true);
         if (filter === "have") return ownership.ownedVariants > 0;
         if (filter === "need") return ownership.missingVariants > 0;
-        if (filter === "dupes") return ownership.totalQty > 1;
+        if (filter === "dupes") return ownership.duplicateVariants > 0;
         return true;
       }
 
