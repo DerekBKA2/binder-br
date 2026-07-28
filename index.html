@@ -2154,6 +2154,7 @@
   <div id="importOverlay" class="cloud-overlay" hidden></div>
   <input id="importFile" class="hidden-file" type="file" accept="application/json,.json">
 
+  <script src="data/pkmn/derekbka.js"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script>
     (() => {
@@ -4144,6 +4145,63 @@
         throw new Error(`pkmn.gg could not be reached from this browser${lastError?.message ? `: ${lastError.message}` : ""}`);
       }
 
+      function getPkmnCacheSlug(username) {
+        return String(username || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "");
+      }
+
+      function readEmbeddedPkmnImport(username) {
+        const slug = getPkmnCacheSlug(username);
+        const embedded = slug ? window.POKE_BINDER_PKMN_IMPORTS?.[slug] : null;
+        if (!embedded) return null;
+        const pageProps = embedded.pageProps || embedded.profile?.pageProps;
+        const pkmnCollection = normalizePkmnCollectionValue(embedded.collection || embedded.pkmnCollection);
+        return pageProps?.userId && Object.keys(pkmnCollection).length
+          ? { pageProps, pkmnCollection, sourceLabel: "cached pkmn.gg data" }
+          : null;
+      }
+
+      async function fetchCachedPkmnImport(username) {
+        const slug = getPkmnCacheSlug(username);
+        if (!slug) throw new Error("No cached pkmn.gg username was provided.");
+        const embedded = readEmbeddedPkmnImport(username);
+        if (embedded) return embedded;
+        const response = await fetch(`data/pkmn/${encodeURIComponent(slug)}.json?_pokeBinder=${Date.now()}`, {
+          cache: "no-store",
+          headers: { Accept: "application/json" }
+        });
+        if (!response.ok) throw new Error(`No cached pkmn.gg import was found for ${username}.`);
+        const payload = await response.json();
+        const pageProps = payload.pageProps || payload.profile?.pageProps;
+        const pkmnCollection = normalizePkmnCollectionValue(payload.collection || payload.pkmnCollection);
+        if (!pageProps?.userId || !Object.keys(pkmnCollection).length) {
+          throw new Error(`The cached pkmn.gg import for ${username} is incomplete.`);
+        }
+        return { pageProps, pkmnCollection, sourceLabel: "cached pkmn.gg data" };
+      }
+
+      async function loadPkmnImportSource(username) {
+        const embedded = readEmbeddedPkmnImport(username);
+        if (embedded) {
+          updatePkmnImport("Loading bundled pkmn.gg collection data...");
+          return embedded;
+        }
+        try {
+          const profileHtml = await fetchPublicPkmnResource(`${PKMN_PROFILE_BASE}/${encodeURIComponent(username)}`, "text");
+          const pageProps = parsePkmnProfilePage(profileHtml);
+          updatePkmnImport("Loading collection quantities...");
+          const pkmnCollection = await loadPkmnCollection(pageProps);
+          return { pageProps, pkmnCollection, sourceLabel: "pkmn.gg" };
+        } catch (liveError) {
+          console.warn("Live pkmn.gg import unavailable, trying same-origin cache:", liveError);
+          updatePkmnImport("Live pkmn.gg import is blocked. Loading cached collection data...");
+          try {
+            return await fetchCachedPkmnImport(username);
+          } catch (cacheError) {
+            throw new Error(`${liveError.message || "pkmn.gg import failed"} ${cacheError.message}`);
+          }
+        }
+      }
+
       function parsePkmnProfilePage(html) {
         const match = String(html || "").match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
         if (!match) throw new Error("pkmn.gg returned an unexpected profile page.");
@@ -4270,10 +4328,7 @@
         updatePkmnImport("Opening public pkmn.gg profile...");
 
         try {
-          const profileHtml = await fetchPublicPkmnResource(`${PKMN_PROFILE_BASE}/${encodeURIComponent(username)}`, "text");
-          const pageProps = parsePkmnProfilePage(profileHtml);
-          updatePkmnImport("Loading collection quantities...");
-          const pkmnCollection = await loadPkmnCollection(pageProps);
+          const { pageProps, pkmnCollection, sourceLabel } = await loadPkmnImportSource(username);
           const cardProperties = Object.entries(pkmnCollection || {});
           if (!cardProperties.length) throw new Error("This public pkmn.gg profile has no cards to import.");
 
@@ -4386,7 +4441,7 @@
           scheduleCloudSync();
           const skippedText = skippedQuantity ? ` ${skippedQuantity} could not be matched.` : "";
           state.pkmnImport.status = "done";
-          updatePkmnImport(`${formatNumber(importedQuantity)} cards imported from ${username}.${skippedText}`, { status: "done" });
+          updatePkmnImport(`${formatNumber(importedQuantity)} cards imported from ${username} via ${sourceLabel}.${skippedText}`, { status: "done" });
           addNotice(`pkmn.gg collection imported: ${formatNumber(importedQuantity)} cards.`, "warn", 5000);
         } catch (error) {
           state.pkmnImport.status = "error";
