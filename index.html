@@ -2185,6 +2185,7 @@
   <input id="importFile" class="hidden-file" type="file" accept="application/json,.json">
 
   <script src="data/pkmn/derekbka.js"></script>
+  <script src="data/pkmn/rik-dawson.js"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script>
     (() => {
@@ -4309,7 +4310,9 @@
       }
 
       function getPkmnCacheSlug(username) {
-        return String(username || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "");
+        const raw = String(username || "").trim();
+        const profileMatch = raw.match(/pkmn\.gg\/u\/([^/?#]+)/i);
+        return (profileMatch ? decodeURIComponent(profileMatch[1]) : raw).toLowerCase().replace(/[^a-z0-9_-]+/g, "");
       }
 
       function readEmbeddedPkmnImport(username) {
