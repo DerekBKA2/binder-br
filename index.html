@@ -4180,10 +4180,11 @@
       }
 
       async function loadPkmnImportSource(username) {
-        const embedded = readEmbeddedPkmnImport(username);
-        if (embedded) {
-          updatePkmnImport("Loading bundled pkmn.gg collection data...");
-          return embedded;
+        try {
+          updatePkmnImport("Loading cached pkmn.gg collection data...");
+          return await fetchCachedPkmnImport(username);
+        } catch (cacheError) {
+          console.warn("Cached pkmn.gg import unavailable, trying live import:", cacheError);
         }
         try {
           const profileHtml = await fetchPublicPkmnResource(`${PKMN_PROFILE_BASE}/${encodeURIComponent(username)}`, "text");
