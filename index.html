@@ -4231,6 +4231,22 @@
         return matches.length === 1 ? matches[0] : null;
       }
 
+      async function getTcgdexSetsForPkmnImport(lang) {
+        const localSets = Array.from(state.sets.values()).filter((set) => set.lang === lang && !isConfirmedEmptySet(set));
+        if (localSets.length) return localSets;
+        if (state.db) {
+          const cachedSets = (await idbGetAll("sets")).filter((set) => set.lang === lang && !isConfirmedEmptySet(set));
+          cachedSets.forEach((set) => mergeSet(set, true));
+          if (cachedSets.length) return cachedSets;
+        }
+        try {
+          return await fetchTcgdexJson(lang, "sets");
+        } catch (error) {
+          console.warn("TCGdex set list unavailable during pkmn.gg import:", lang, error);
+          return [];
+        }
+      }
+
       function getPkmnVariantField(variant) {
         const value = normalizeSearch(variant || "").replace(/[^a-z0-9]+/g, "");
         if (value.includes("reverse")) return "reverseQty";
@@ -4303,17 +4319,30 @@
       }
 
       async function cacheImportedSetCatalog(mapping, progress) {
-        const detail = await fetchTcgdexJson(mapping.lang, `sets/${encodeURIComponent(mapping.tcgdexSet.id)}`);
-        const normalizedSet = normalizeSetRecord(detail, mapping.lang);
-        const cards = normalizeCardsFromSetDetail(detail, mapping.lang, normalizedSet.id);
-        normalizedSet.cardCount = normalizedSet.cardCount || cards.length;
-        normalizedSet.cardsLoadedAt = new Date().toISOString();
-        mergeSet(normalizedSet, true);
-        const mergedCards = cards.map((card) => mergeCard(card)).filter(Boolean);
-        await Promise.all([idbPut("sets", normalizedSet), idbPutMany("cards", mergedCards)]);
+        const localSet = state.sets.get(makeSetKey(mapping.lang, mapping.tcgdexSet.id)) || mapping.tcgdexSet;
+        const localCards = getCardsForExactSet(localSet.key);
+        if (localCards.length) {
+          progress.count += 1;
+          updatePkmnImport(`Matching cached cards ${progress.count}/${progress.total}...`);
+          return { ...mapping, detail: localSet, cards: localCards };
+        }
         progress.count += 1;
-        updatePkmnImport(`Matching cards ${progress.count}/${progress.total}...`);
-        return { ...mapping, detail: normalizedSet, cards: mergedCards };
+        try {
+          const detail = await fetchTcgdexJson(mapping.lang, `sets/${encodeURIComponent(mapping.tcgdexSet.id)}`);
+          const normalizedSet = normalizeSetRecord(detail, mapping.lang);
+          const cards = normalizeCardsFromSetDetail(detail, mapping.lang, normalizedSet.id);
+          normalizedSet.cardCount = normalizedSet.cardCount || cards.length;
+          normalizedSet.cardsLoadedAt = new Date().toISOString();
+          mergeSet(normalizedSet, true);
+          const mergedCards = cards.map((card) => mergeCard(card)).filter(Boolean);
+          await Promise.all([idbPut("sets", normalizedSet), idbPutMany("cards", mergedCards)]);
+          updatePkmnImport(`Matching cards ${progress.count}/${progress.total}...`);
+          return { ...mapping, detail: normalizedSet, cards: mergedCards };
+        } catch (error) {
+          console.warn("Imported set catalog unavailable:", mapping.pkmnSetId, error);
+          updatePkmnImport(`Skipping unavailable set catalogs ${progress.count}/${progress.total}...`);
+          return { ...mapping, detail: localSet, cards: [] };
+        }
       }
 
       async function importPkmnCollection() {
@@ -4335,8 +4364,8 @@
 
           updatePkmnImport("Matching pkmn.gg sets to TCGdex...");
           const [englishSets, japaneseSets] = await Promise.all([
-            fetchTcgdexJson("en", "sets"),
-            fetchTcgdexJson("ja", "sets")
+            getTcgdexSetsForPkmnImport("en"),
+            getTcgdexSetsForPkmnImport("ja")
           ]);
           const allPkmnSets = Array.isArray(pageProps.allSets) ? pageProps.allSets : [];
           const sortedPkmnSetIds = allPkmnSets.map((set) => String(set.id || "")).filter(Boolean).sort((a, b) => b.length - a.length);
@@ -4362,8 +4391,12 @@
           }).filter(Boolean));
           const specialCatalogs = new Map();
           await mapLimit(Array.from(specialSetIds), 3, async (setId) => {
-            const payload = await fetchPublicPkmnResource(`${PKMN_API_BASE}/v1/set/cards/${encodeURIComponent(setId)}`);
-            specialCatalogs.set(setId, payload?.value || []);
+            try {
+              const payload = await fetchPublicPkmnResource(`${PKMN_API_BASE}/v1/set/cards/${encodeURIComponent(setId)}`);
+              specialCatalogs.set(setId, payload?.value || []);
+            } catch (error) {
+              console.warn("Optional pkmn.gg special card catalog skipped:", setId, error);
+            }
           });
 
           const imported = new Map();
