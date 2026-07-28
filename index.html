@@ -114,7 +114,7 @@
     }
 
     .brand-row {
-      min-height: 72px;
+      min-height: 64px;
       padding: 16px;
       display: flex;
       align-items: center;
@@ -154,6 +154,32 @@
       background: #0f172a;
       border: 2px solid #f8fafc;
       position: absolute;
+    }
+
+    .account-switcher {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 38px;
+      gap: 8px;
+      padding: 10px 14px 0;
+    }
+
+    .account-select {
+      min-width: 0;
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid var(--line-soft);
+      background: #101620;
+      color: #fff;
+      padding: 0 10px;
+      font-weight: 800;
+    }
+
+    .account-add {
+      width: 38px;
+      min-width: 38px;
+      padding: 0;
+      font-size: 20px;
+      font-weight: 900;
     }
 
     .sync-pill {
@@ -2087,6 +2113,10 @@
         </div>
         <button id="closeSidebarBtn" class="mobile-close" type="button" aria-label="Close sets">Close</button>
       </div>
+      <div class="account-switcher" aria-label="Account switcher">
+        <select id="accountSelect" class="account-select" aria-label="Current account"></select>
+        <button id="addAccountBtn" class="account-add" type="button" title="Add account" aria-label="Add account">+</button>
+      </div>
       <div id="sidebarTrophySummary" class="sidebar-trophy-summary" aria-label="Trophy summary"></div>
       <div class="sidebar-toolbar">
         <button id="trophyRoomBtn" class="nav-button" type="button">Trophy Room</button>
@@ -2178,6 +2208,10 @@
         ja: "ja"
       };
       const CART_STORAGE_KEY = "binder-br-cart-v1";
+      const ACCOUNTS_STORAGE_KEY = "poke-binder-accounts-v1";
+      const ACTIVE_ACCOUNT_STORAGE_KEY = "poke-binder-active-account-v1";
+      const DEFAULT_ACCOUNT_ID = "derekbka";
+      const DEFAULT_ACCOUNT_NAME = "DerekBKA";
       const CLOUD_CONFIG_STORAGE_KEY = "binder-br-cloud-v1";
       const CLOUD_TOKEN_SESSION_KEY = "binder-br-cloud-token-v1";
       const CLOUD_RECOVERY_META_KEY = "cloud-recovery-latest";
@@ -2461,6 +2495,8 @@
         cardsBySet: new Map(),
         collection: new Map(),
         cart: new Map(),
+        accounts: [],
+        activeAccountId: DEFAULT_ACCOUNT_ID,
         notices: [],
         expandedLangs: new Set(LANGUAGE_ORDER),
         expandedSeries: new Set(),
@@ -2514,6 +2550,8 @@
       const els = {
         sidebar: document.getElementById("sidebar"),
         sidebarOverlay: document.getElementById("sidebarOverlay"),
+        accountSelect: document.getElementById("accountSelect"),
+        addAccountBtn: document.getElementById("addAccountBtn"),
         sidebarTrophySummary: document.getElementById("sidebarTrophySummary"),
         languageTree: document.getElementById("languageTree"),
         trophyRoomBtn: document.getElementById("trophyRoomBtn"),
@@ -2550,6 +2588,7 @@
       async function init() {
         els.homeBtn.textContent = "HOME";
         bindEvents();
+        loadAccounts();
         loadCloudConfig();
         loadCart();
         seedFallbackCatalog();
@@ -2579,6 +2618,8 @@
       }
 
       function bindEvents() {
+        els.accountSelect.addEventListener("change", () => switchAccount(els.accountSelect.value));
+        els.addAccountBtn.addEventListener("click", addAccountFromPrompt);
         els.languageTree.addEventListener("click", handleTreeClick);
         els.trophyRoomBtn.addEventListener("click", selectTrophyRoom);
         els.homeBtn.addEventListener("click", selectHome);
@@ -2855,7 +2896,7 @@
         const collection = await idbGetAll("collection");
         const normalized = mergeCollectionEntries(collection);
         state.collection = new Map(normalized.map((entry) => [entry.cardKey, entry]));
-        const migrated = collection.some((entry) => resolveSharedCollectionKey(entry.cardKey) !== entry.cardKey) || normalized.length !== collection.length;
+        const migrated = collection.some((entry) => normalizeCollection(entry).cardKey !== entry.cardKey || !entry.accountId) || normalized.length !== collection.length;
         if (migrated) {
           await idbClear("collection");
           await idbPutMany("collection", normalized);
@@ -3361,8 +3402,13 @@
       }
 
       function normalizeCollection(entry) {
+        const parsedAccountKey = parseAccountCollectionKey(entry.cardKey);
+        const accountId = makeAccountId(entry.accountId || parsedAccountKey?.accountId || DEFAULT_ACCOUNT_ID);
+        const sharedCardKey = parsedAccountKey?.sharedKey || resolveSharedCollectionKey(entry.cardKey);
         return {
-          cardKey: resolveSharedCollectionKey(entry.cardKey),
+          cardKey: makeAccountCollectionKey(sharedCardKey, accountId),
+          accountId,
+          baseCardKey: sharedCardKey,
           normalQty: Math.max(0, Number(entry.normalQty || 0)),
           holoQty: Math.max(0, Number(entry.holoQty || 0)),
           reverseQty: Math.max(0, Number(entry.reverseQty || 0)),
@@ -3380,6 +3426,115 @@
           notes: entry.notes || "",
           updatedAt: entry.updatedAt || ""
         };
+      }
+
+      function makeAccountId(value) {
+        return String(value || DEFAULT_ACCOUNT_NAME).trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "") || DEFAULT_ACCOUNT_ID;
+      }
+
+      function normalizeAccount(value) {
+        const name = String(value?.name || value?.pkmnUsername || value || DEFAULT_ACCOUNT_NAME).trim() || DEFAULT_ACCOUNT_NAME;
+        const id = makeAccountId(value?.id || name);
+        return {
+          id,
+          name,
+          pkmnUsername: String(value?.pkmnUsername || name).trim() || name
+        };
+      }
+
+      function loadAccounts() {
+        let accounts = [];
+        try {
+          const saved = JSON.parse(localStorage.getItem(ACCOUNTS_STORAGE_KEY) || "[]");
+          if (Array.isArray(saved)) accounts = saved.map(normalizeAccount);
+        } catch (error) {
+          console.warn("Account list load failed:", error);
+        }
+        const byId = new Map(accounts.map((account) => [account.id, account]));
+        if (!byId.has(DEFAULT_ACCOUNT_ID)) {
+          byId.set(DEFAULT_ACCOUNT_ID, normalizeAccount({ id: DEFAULT_ACCOUNT_ID, name: DEFAULT_ACCOUNT_NAME, pkmnUsername: DEFAULT_ACCOUNT_NAME }));
+        }
+        state.accounts = Array.from(byId.values());
+        const savedActive = makeAccountId(localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) || DEFAULT_ACCOUNT_ID);
+        state.activeAccountId = byId.has(savedActive) ? savedActive : DEFAULT_ACCOUNT_ID;
+        persistAccounts();
+      }
+
+      function persistAccounts() {
+        try {
+          localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(state.accounts));
+          localStorage.setItem(ACTIVE_ACCOUNT_STORAGE_KEY, state.activeAccountId);
+        } catch (error) {
+          console.warn("Account list save failed:", error);
+        }
+      }
+
+      function getActiveAccount() {
+        return state.accounts.find((account) => account.id === state.activeAccountId) || normalizeAccount({ id: DEFAULT_ACCOUNT_ID, name: DEFAULT_ACCOUNT_NAME });
+      }
+
+      function renderAccountSwitcher() {
+        if (!els.accountSelect) return;
+        const options = state.accounts.map((account) => `
+          <option value="${escapeAttr(account.id)}" ${account.id === state.activeAccountId ? "selected" : ""}>${escapeHtml(account.name)}</option>
+        `).join("");
+        els.accountSelect.innerHTML = options;
+        const account = getActiveAccount();
+        els.accountSelect.title = `Current account: ${account.name}`;
+      }
+
+      function addAccountFromPrompt() {
+        const name = window.prompt("New account name or pkmn.gg username:");
+        if (!name || !name.trim()) return;
+        const account = normalizeAccount(name);
+        const existing = state.accounts.find((item) => item.id === account.id);
+        if (!existing) {
+          state.accounts.push(account);
+        }
+        switchAccount(account.id);
+      }
+
+      function switchAccount(accountId) {
+        const nextId = makeAccountId(accountId);
+        if (!state.accounts.some((account) => account.id === nextId)) return;
+        if (state.activeAccountId === nextId) return;
+        state.activeAccountId = nextId;
+        persistAccounts();
+        state.cart.clear();
+        state.cartListPage = 0;
+        state.homePage = 1;
+        state.filter = "all";
+        loadCart();
+        closeCardPreview();
+        closeCart();
+        renderAll();
+        addNotice(`Switched to ${getActiveAccount().name}.`, "warn", 1800);
+      }
+
+      function updateActiveAccountFromImport(username) {
+        const account = getActiveAccount();
+        account.pkmnUsername = username || account.pkmnUsername;
+        if (username && account.id === makeAccountId(account.name)) {
+          account.name = username;
+        }
+        state.accounts = state.accounts.map((item) => item.id === account.id ? account : item);
+        persistAccounts();
+        renderAccountSwitcher();
+      }
+
+      function parseAccountCollectionKey(value) {
+        const text = String(value || "");
+        if (!text.startsWith("account:")) return null;
+        const parts = text.split(":");
+        if (parts.length < 4) return null;
+        return {
+          accountId: makeAccountId(parts[1]),
+          sharedKey: parts.slice(2).join(":")
+        };
+      }
+
+      function makeAccountCollectionKey(sharedKey, accountId = state.activeAccountId) {
+        return `account:${makeAccountId(accountId)}:${sharedKey}`;
       }
 
       function normalizeCollectionLocalId(value) {
@@ -3409,6 +3564,8 @@
           return makeSharedCollectionKey(cardOrKey.lang, cardOrKey.setId, cardOrKey.localId || cardOrKey.id);
         }
         const rawKey = String(cardOrKey || "").trim();
+        const accountKey = parseAccountCollectionKey(rawKey);
+        if (accountKey) return accountKey.sharedKey;
         if (!rawKey || rawKey.startsWith("shared:")) return rawKey;
         const card = findCard(rawKey);
         if (card) return makeSharedCollectionKey(card.lang, card.setId, card.localId || card.id);
@@ -3979,11 +4136,14 @@
       }
 
       function getCollection(cardKey) {
-        const sharedKey = resolveSharedCollectionKey(cardKey);
-        if (!state.collection.has(sharedKey)) {
-          state.collection.set(sharedKey, normalizeCollection({ cardKey: sharedKey }));
+        const parsed = parseAccountCollectionKey(cardKey);
+        const sharedKey = parsed?.sharedKey || resolveSharedCollectionKey(cardKey);
+        const accountId = parsed?.accountId || state.activeAccountId;
+        const collectionKey = makeAccountCollectionKey(sharedKey, accountId);
+        if (!state.collection.has(collectionKey)) {
+          state.collection.set(collectionKey, normalizeCollection({ cardKey: sharedKey, accountId }));
         }
-        return state.collection.get(sharedKey);
+        return state.collection.get(collectionKey);
       }
 
       function getTotalQuantity(cardOrKey) {
@@ -4039,6 +4199,7 @@
       }
 
       function renderAll() {
+        renderAccountSwitcher();
         renderSyncPill();
         renderCloudButton();
         renderNotices();
@@ -4075,6 +4236,8 @@
       }
 
       function openImportPanel() {
+        const account = getActiveAccount();
+        state.pkmnImport.username = account.pkmnUsername || account.name || DEFAULT_ACCOUNT_NAME;
         els.importOverlay.hidden = false;
         renderImportPanel();
       }
@@ -4441,6 +4604,7 @@
 
           const importedAt = new Date().toISOString();
           state.collection.forEach((entry, key) => {
+            if (entry.accountId !== state.activeAccountId) return;
             const hasPkmnContribution = Number(entry.pkmnNormalQty || 0) > 0 || Number(entry.pkmnHoloQty || 0) > 0 || Number(entry.pkmnReverseQty || 0) > 0;
             if (!hasPkmnContribution) return;
             ["normal", "holo", "reverse"].forEach((variant) => {
@@ -4475,6 +4639,7 @@
           scheduleCloudSync();
           const skippedText = skippedQuantity ? ` ${skippedQuantity} could not be matched.` : "";
           state.pkmnImport.status = "done";
+          updateActiveAccountFromImport(username);
           updatePkmnImport(`${formatNumber(importedQuantity)} cards imported from ${username} via ${sourceLabel}.${skippedText}`, { status: "done" });
           addNotice(`pkmn.gg collection imported: ${formatNumber(importedQuantity)} cards.`, "warn", 5000);
         } catch (error) {
@@ -5995,6 +6160,8 @@
           version: 1,
           updatedAt: new Date().toISOString(),
           deviceId: state.cloud.deviceId,
+          accounts: state.accounts,
+          activeAccountId: state.activeAccountId,
           collectionResetAt: state.cloud.collectionResetAt,
           cartUpdatedAt: state.cloud.cartUpdatedAt,
           collection: Array.from(state.collection.values()).filter(isCollectionEntryMeaningful).map(normalizeCollection),
@@ -6023,6 +6190,8 @@
           version: 1,
           updatedAt: payloadUpdatedAt,
           deviceId: String(payload?.deviceId || ""),
+          accounts: Array.isArray(payload?.accounts) ? payload.accounts.map(normalizeAccount) : [],
+          activeAccountId: makeAccountId(payload?.activeAccountId || state.activeAccountId),
           collectionResetAt: String(payload?.collectionResetAt || ""),
           cartUpdatedAt: String(payload?.cartUpdatedAt || ""),
           collection,
@@ -6052,6 +6221,8 @@
           version: 1,
           updatedAt: new Date().toISOString(),
           deviceId: state.cloud.deviceId,
+          accounts: Array.from(new Map([...state.accounts, ...remote.accounts].map((account) => [account.id, account])).values()),
+          activeAccountId: state.activeAccountId,
           collectionResetAt: resetAt,
           cartUpdatedAt: remoteCartWins ? remote.cartUpdatedAt : local.cartUpdatedAt,
           collection: Array.from(mergedCollection.values()),
@@ -6143,6 +6314,11 @@
           }
           state.collection = new Map(normalized.collection.map((entry) => [entry.cardKey, entry]));
           state.cart = new Map(normalized.cart.map((item) => [item.cartKey, item]));
+          if (normalized.accounts.length) {
+            const byId = new Map([...state.accounts, ...normalized.accounts].map((account) => [account.id, account]));
+            state.accounts = Array.from(byId.values());
+            persistAccounts();
+          }
           state.cloud.collectionResetAt = normalized.collectionResetAt;
           state.cloud.cartUpdatedAt = normalized.cartUpdatedAt;
           await idbClear("collection");
@@ -6204,8 +6380,11 @@
 
       function loadCart() {
         try {
-          const items = JSON.parse(localStorage.getItem(CART_STORAGE_KEY) || "[]");
+          const cartKey = getCartStorageKey();
+          const fallback = state.activeAccountId === DEFAULT_ACCOUNT_ID ? localStorage.getItem(CART_STORAGE_KEY) : null;
+          const items = JSON.parse(localStorage.getItem(cartKey) || fallback || "[]");
           if (!Array.isArray(items)) return;
+          state.cart.clear();
           items.forEach((item) => {
             const normalized = normalizeCartItem(item);
             if (normalized) state.cart.set(normalized.cartKey, normalized);
@@ -6221,7 +6400,7 @@
 
       function saveCart(touchCloud = true) {
         try {
-          localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(Array.from(state.cart.values())));
+          localStorage.setItem(getCartStorageKey(), JSON.stringify(Array.from(state.cart.values())));
           if (touchCloud && !state.cloud.suppressAutoSync) {
             state.cloud.cartUpdatedAt = new Date().toISOString();
             persistCloudConfig();
@@ -6230,6 +6409,10 @@
         } catch (error) {
           console.warn("Cart save failed:", error);
         }
+      }
+
+      function getCartStorageKey(accountId = state.activeAccountId) {
+        return `${CART_STORAGE_KEY}:${makeAccountId(accountId)}`;
       }
 
       function addToCart(cardKey, variant = "normal", options = {}) {
@@ -6514,6 +6697,8 @@
           app: "POKE BINDER",
           version: 1,
           exportedAt: new Date().toISOString(),
+          accounts: state.accounts,
+          activeAccountId: state.activeAccountId,
           sets: state.db ? await idbGetAll("sets") : Array.from(state.sets.values()),
           cards: state.db ? await idbGetAll("cards") : Array.from(state.cardsBySet.values()).flatMap((bucket) => Array.from(bucket.values())),
           collection: Array.from(state.collection.values()),
@@ -6544,6 +6729,12 @@
           const cards = Array.isArray(backup.cards) ? backup.cards : [];
           const collection = Array.isArray(backup.collection) ? backup.collection : [];
           const cart = Array.isArray(backup.cart) ? backup.cart.map(normalizeCartItem).filter(Boolean) : [];
+          if (Array.isArray(backup.accounts) && backup.accounts.length) {
+            const byId = new Map([...state.accounts, ...backup.accounts.map(normalizeAccount)].map((account) => [account.id, account]));
+            state.accounts = Array.from(byId.values());
+            state.activeAccountId = byId.has(makeAccountId(backup.activeAccountId)) ? makeAccountId(backup.activeAccountId) : state.activeAccountId;
+            persistAccounts();
+          }
           const importedAt = new Date().toISOString();
           sets.forEach((set) => mergeSet(set, true));
           cards.forEach((card) => mergeCard(card, true));
@@ -6578,16 +6769,20 @@
       }
 
       async function resetCollectionOnly() {
-        if (!window.confirm("Reset only your collection quantities, prices, notes, and LigaPokemon URLs? Catalog cache will stay.")) {
+        if (!window.confirm(`Reset only ${getActiveAccount().name}'s collection quantities, prices, notes, and LigaPokemon URLs? Catalog cache will stay.`)) {
           return;
         }
         state.cloud.collectionResetAt = new Date().toISOString();
         persistCloudConfig();
-        state.collection.clear();
+        Array.from(state.collection.keys()).forEach((key) => {
+          const entry = state.collection.get(key);
+          if (entry?.accountId === state.activeAccountId) state.collection.delete(key);
+        });
         await idbClear("collection");
+        await idbPutMany("collection", Array.from(state.collection.values()).filter(isCollectionEntryMeaningful));
         renderAll();
         scheduleCloudSync();
-        addNotice("Collection state reset. Catalog cache was kept.", "warn", 4000);
+        addNotice(`${getActiveAccount().name}'s collection state reset. Catalog cache was kept.`, "warn", 4000);
       }
 
       async function resetCacheOnly() {
