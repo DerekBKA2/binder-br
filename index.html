@@ -4133,7 +4133,38 @@
       // holo + reverse, and double rares use only holo. Other known TCGdex variants are preserved.
       function getVariantKeys(card) {
         const variants = resolvePhysicalVariantSlots(card.variants || {}, card);
+        const importedOverride = getImportedVariantOverride(card, variants);
+        if (importedOverride) return importedOverride;
         return ["normal", "holo", "reverse"].filter((key) => variants[key]);
+      }
+
+      function getExistingCollection(card) {
+        if (!card?.key) return null;
+        const sharedKey = resolveSharedCollectionKey(card);
+        return state.collection.get(makeAccountCollectionKey(sharedKey, state.activeAccountId)) || state.collection.get(sharedKey) || null;
+      }
+
+      function getImportedVariantOverride(card, variants = {}) {
+        if (!card || card.variantsKnown) return null;
+        const entry = getExistingCollection(card);
+        if (!entry) return null;
+        const importedNormal = Number(entry.pkmnNormalQty || 0);
+        const importedHolo = Number(entry.pkmnHoloQty || 0);
+        const importedReverse = Number(entry.pkmnReverseQty || 0);
+        if (importedHolo > 0 && importedNormal <= 0 && importedReverse <= 0 && shouldTreatImportedHoloAsSingleSlot(card, variants)) {
+          return ["holo"];
+        }
+        return null;
+      }
+
+      function shouldTreatImportedHoloAsSingleSlot(card, variants = {}) {
+        const haystack = normalizeSearch([card?.name, card?.rarity, card?.setId].filter(Boolean).join(" "));
+        if (/(double|ultra|secret|secreta|hyper|hiper|rainbow|gold|illustration|ilustracao|ace spec|radiant|ex|vmax|vstar|gx)/.test(haystack)) {
+          return true;
+        }
+        const set = state.sets.get(card?.setKey);
+        const seriesText = normalizeSearch([set?.series, set?.seriesId].filter(Boolean).join(" "));
+        return /^me\d/i.test(String(card?.setId || "")) && /mega/.test(seriesText);
       }
 
       function getCollection(cardKey) {
@@ -4567,6 +4598,33 @@
         }
       }
 
+      function getPkmnRecordVariantEvidence(records) {
+        const evidence = { normal: false, holo: false, reverse: false };
+        (Array.isArray(records) ? records : [records]).forEach((record) => {
+          const value = normalizeSearch(record?.variant || "").replace(/[^a-z0-9]+/g, "");
+          if (value.includes("reverse")) evidence.reverse = true;
+          else if (value.includes("holo")) evidence.holo = true;
+          else if (value.includes("normal") || value.includes("1stedition") || value === "unlimited") evidence.normal = true;
+        });
+        return evidence;
+      }
+
+      function reconcileImportedCardVariants(card, records) {
+        if (!card || card.variantsKnown) return card;
+        const evidence = getPkmnRecordVariantEvidence(records);
+        let variants = null;
+        if (evidence.normal && evidence.reverse && !evidence.holo) {
+          variants = { normal: true, holo: false, reverse: true };
+        } else if (evidence.holo && evidence.reverse && !evidence.normal) {
+          variants = { normal: false, holo: true, reverse: true };
+        } else if (evidence.holo && !evidence.normal && !evidence.reverse && shouldTreatImportedHoloAsSingleSlot(card, card.variants || {})) {
+          variants = { normal: false, holo: true, reverse: false };
+        }
+        if (!variants) return card;
+        const next = { ...card, variants, variantsKnown: true, variantsInferred: true, syncedAt: new Date().toISOString() };
+        return mergeCard(next) || next;
+      }
+
       async function importPkmnCollection() {
         const usernameInput = els.importOverlay.querySelector("#pkmnUsernameInput");
         const username = String(usernameInput?.value || state.pkmnImport.username || "").trim();
@@ -4658,6 +4716,12 @@
             continue;
           }
           tcgdexCard = await ensureImportedCardDetail(tcgdexCard, records, importedDetailCache);
+          const reconciledCard = reconcileImportedCardVariants(tcgdexCard, records);
+          if (reconciledCard !== tcgdexCard) {
+            tcgdexCard = reconciledCard;
+            importedDetailCache.set(tcgdexCard.key, tcgdexCard);
+            await idbPut("cards", tcgdexCard);
+          }
           const sharedKey = resolveSharedCollectionKey(tcgdexCard);
           if (!imported.has(sharedKey)) imported.set(sharedKey, { normalQty: 0, holoQty: 0, reverseQty: 0 });
           (Array.isArray(records) ? records : [records]).forEach((record) => {
