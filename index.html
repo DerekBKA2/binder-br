@@ -2821,6 +2821,13 @@
           if (!action) return;
           if (action.dataset.importAction === "backup") {
             els.importFile.click();
+          } else if (action.dataset.importAction === "drive-restore") {
+            closeImportPanel();
+            if (hasCloudToken()) {
+              restoreFromGoogleDrive();
+            } else {
+              openCloud();
+            }
           } else if (action.dataset.importAction === "pkmn") {
             importPkmnCollection();
           }
@@ -4281,8 +4288,12 @@
       function renderImportPanel() {
         if (els.importOverlay.hidden) return;
         const importing = state.pkmnImport.status === "importing";
+        const onlinePage = /github\.io$/i.test(window.location.hostname);
         const statusClass = state.pkmnImport.error ? "error" : state.pkmnImport.status === "done" ? "connected" : "";
         const status = state.pkmnImport.error || state.pkmnImport.message;
+        const onlineHint = onlinePage
+          ? "Online pkmn.gg import is blocked by browser/CORS privacy rules. Import on this PC, sync to Google Drive, then restore here."
+          : "";
         els.importOverlay.innerHTML = `
           <section class="cloud-dialog" role="dialog" aria-modal="true" aria-label="Import collection">
             <div class="cloud-head">
@@ -4293,9 +4304,11 @@
               <span>pkmn.gg public username</span>
               <input id="pkmnUsernameInput" type="text" value="${escapeAttr(state.pkmnImport.username)}" placeholder="DerekBKA" autocomplete="off" ${importing ? "disabled" : ""}>
             </label>
+            ${onlineHint ? `<div class="cloud-status-row"><span class="cloud-status">${escapeHtml(onlineHint)}</span></div>` : ""}
             ${status ? `<div class="cloud-status-row"><span class="cloud-status ${statusClass}">${escapeHtml(status)}</span></div>` : ""}
             <div class="cloud-actions">
-              <button type="button" data-import-action="pkmn" ${importing ? "disabled" : ""}>${importing ? "Importing..." : "Import fresh pkmn.gg"}</button>
+              <button type="button" data-import-action="pkmn" ${importing || onlinePage ? "disabled" : ""}>${importing ? "Importing..." : onlinePage ? "Import locally only" : "Import fresh pkmn.gg"}</button>
+              ${onlinePage ? `<button type="button" data-import-action="drive-restore" ${state.cloud.status === "syncing" ? "disabled" : ""}>Restore from Drive</button>` : ""}
               <button type="button" data-import-action="backup" ${importing ? "disabled" : ""}>Import JSON</button>
             </div>
           </section>
