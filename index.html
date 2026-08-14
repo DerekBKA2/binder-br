@@ -4358,6 +4358,34 @@
           : null;
       }
 
+      function readPrivateEmbeddedPkmnImport(username) {
+        const slug = getPkmnCacheSlug(username);
+        const embedded = slug ? window.POKE_BINDER_PRIVATE_PKMN_IMPORTS?.[slug] : null;
+        if (!embedded) return null;
+        const parsed = getPkmnImportFromJson(embedded);
+        if (!parsed) return null;
+        const cachedAt = embedded.cachedAt ? ` cached ${formatCloudTime(embedded.cachedAt)}` : "";
+        return { ...parsed, cachedAt: embedded.cachedAt || "", sourceLabel: `private local pkmn.gg snapshot${cachedAt}` };
+      }
+
+      function loadPrivatePkmnImportScript(username) {
+        const slug = getPkmnCacheSlug(username);
+        if (!slug) return Promise.reject(new Error("No private pkmn.gg username was provided."));
+        const existing = readPrivateEmbeddedPkmnImport(username);
+        if (existing) return Promise.resolve(existing);
+        return new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = `private-pkmn-${encodeURIComponent(slug)}-current.js?_pokeBinder=${Date.now()}`;
+          script.async = true;
+          script.onload = () => {
+            const parsed = readPrivateEmbeddedPkmnImport(username);
+            parsed ? resolve(parsed) : reject(new Error(`The private pkmn.gg script snapshot for ${username} is incomplete.`));
+          };
+          script.onerror = () => reject(new Error(`No private pkmn.gg script snapshot was found for ${username}.`));
+          document.head.appendChild(script);
+        });
+      }
+
       function assertFreshPkmnCache(importData, username) {
         const cachedAt = Date.parse(importData?.cachedAt || "");
         const maxAgeMs = 12 * 60 * 60 * 1000;
@@ -4392,14 +4420,21 @@
         if (/github\.io$/i.test(window.location.hostname)) {
           throw new Error("Private local pkmn.gg snapshots are not available on GitHub Pages.");
         }
-        const response = await fetch(`private-pkmn-${encodeURIComponent(slug)}-current.json?_pokeBinder=${Date.now()}`, {
-          cache: "no-store",
-          headers: { Accept: "application/json" }
-        });
-        if (!response.ok) throw new Error(`No private pkmn.gg snapshot was found for ${username}.`);
-        const parsed = getPkmnImportFromJson(await response.json());
-        if (!parsed) throw new Error(`The private pkmn.gg snapshot for ${username} is incomplete.`);
-        return parsed;
+        try {
+          const response = await fetch(`private-pkmn-${encodeURIComponent(slug)}-current.json?_pokeBinder=${Date.now()}`, {
+            cache: "no-store",
+            headers: { Accept: "application/json" }
+          });
+          if (!response.ok) throw new Error(`No private pkmn.gg snapshot was found for ${username}.`);
+          const payload = await response.json();
+          const parsed = getPkmnImportFromJson(payload);
+          if (!parsed) throw new Error(`The private pkmn.gg snapshot for ${username} is incomplete.`);
+          const cachedAt = payload.cachedAt ? ` cached ${formatCloudTime(payload.cachedAt)}` : "";
+          return { ...parsed, cachedAt: payload.cachedAt || "", sourceLabel: `private local pkmn.gg snapshot${cachedAt}` };
+        } catch (error) {
+          console.warn("Private local JSON snapshot unavailable, trying script snapshot:", error);
+          return await loadPrivatePkmnImportScript(username);
+        }
       }
 
       async function loadPkmnImportSource(username) {
