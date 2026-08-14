@@ -4413,12 +4413,18 @@
         }
       }
 
-      function getPkmnVariantField(variant) {
+      function getPkmnVariantField(variant, card = null) {
         const value = normalizeSearch(variant || "").replace(/[^a-z0-9]+/g, "");
-        if (value.includes("reverse")) return "reverseQty";
-        if (value.includes("holo")) return "holoQty";
-        if (value.includes("normal") || value.includes("1stedition") || value === "unlimited") return "normalQty";
-        return "";
+        let field = "";
+        if (value.includes("reverse")) field = "reverseQty";
+        else if (value.includes("holo")) field = "holoQty";
+        else if (value.includes("normal") || value.includes("1stedition") || value === "unlimited") field = "normalQty";
+        if (!field || !card) return field;
+        const supported = new Set(getVariantKeys(card));
+        if (field === "normalQty" && !supported.has("normal") && supported.has("holo")) return "holoQty";
+        if (field === "holoQty" && !supported.has("holo") && supported.has("normal")) return "normalQty";
+        if (field === "reverseQty" && !supported.has("reverse")) return "";
+        return field;
       }
 
       function getPkmnRecordQuantity(record) {
@@ -4595,7 +4601,7 @@
             if (!imported.has(sharedKey)) imported.set(sharedKey, { normalQty: 0, holoQty: 0, reverseQty: 0 });
             (Array.isArray(records) ? records : [records]).forEach((record) => {
               const quantity = getPkmnRecordQuantity(record);
-              const field = getPkmnVariantField(record?.variant);
+              const field = getPkmnVariantField(record?.variant, tcgdexCard);
               if (!field) {
                 skippedQuantity += quantity;
                 return;
