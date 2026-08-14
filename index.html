@@ -4347,7 +4347,29 @@
         return { pageProps, pkmnCollection, sourceLabel: `cached pkmn.gg data${cachedAt}` };
       }
 
+      async function fetchPrivatePkmnImport(username) {
+        const slug = getPkmnCacheSlug(username);
+        if (!slug) throw new Error("No private pkmn.gg username was provided.");
+        if (/github\.io$/i.test(window.location.hostname)) {
+          throw new Error("Private local pkmn.gg snapshots are not available on GitHub Pages.");
+        }
+        const response = await fetch(`private-pkmn-${encodeURIComponent(slug)}-current.json?_pokeBinder=${Date.now()}`, {
+          cache: "no-store",
+          headers: { Accept: "application/json" }
+        });
+        if (!response.ok) throw new Error(`No private pkmn.gg snapshot was found for ${username}.`);
+        const parsed = getPkmnImportFromJson(await response.json());
+        if (!parsed) throw new Error(`The private pkmn.gg snapshot for ${username} is incomplete.`);
+        return parsed;
+      }
+
       async function loadPkmnImportSource(username) {
+        try {
+          updatePkmnImport("Loading private local pkmn.gg snapshot...");
+          return await fetchPrivatePkmnImport(username);
+        } catch (privateError) {
+          console.warn("Private local pkmn.gg snapshot unavailable, trying cached import:", privateError);
+        }
         try {
           updatePkmnImport("Loading cached pkmn.gg collection data...");
           return await fetchCachedPkmnImport(username);
