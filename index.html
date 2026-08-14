@@ -4295,7 +4295,7 @@
             </label>
             ${status ? `<div class="cloud-status-row"><span class="cloud-status ${statusClass}">${escapeHtml(status)}</span></div>` : ""}
             <div class="cloud-actions">
-              <button type="button" data-import-action="pkmn" ${importing ? "disabled" : ""}>${importing ? "Importing..." : "Import pkmn.gg"}</button>
+              <button type="button" data-import-action="pkmn" ${importing ? "disabled" : ""}>${importing ? "Importing..." : "Import fresh pkmn.gg"}</button>
               <button type="button" data-import-action="backup" ${importing ? "disabled" : ""}>Import JSON</button>
             </div>
           </section>
@@ -4354,15 +4354,23 @@
         const pkmnCollection = normalizePkmnCollectionValue(embedded.collection || embedded.pkmnCollection);
         const cachedAt = embedded.cachedAt ? ` cached ${formatCloudTime(embedded.cachedAt)}` : "";
         return pageProps?.userId && Object.keys(pkmnCollection).length
-          ? { pageProps, pkmnCollection, sourceLabel: `cached pkmn.gg data${cachedAt}` }
+          ? { pageProps, pkmnCollection, cachedAt: embedded.cachedAt || "", sourceLabel: `cached pkmn.gg data${cachedAt}` }
           : null;
+      }
+
+      function assertFreshPkmnCache(importData, username) {
+        const cachedAt = Date.parse(importData?.cachedAt || "");
+        const maxAgeMs = 12 * 60 * 60 * 1000;
+        if (Number.isFinite(cachedAt) && Date.now() - cachedAt <= maxAgeMs) return importData;
+        const age = importData?.cachedAt ? ` from ${formatCloudTime(importData.cachedAt)}` : "";
+        throw new Error(`The bundled pkmn.gg cache for ${username}${age} is stale. Use Import JSON with a fresh pkmn.gg snapshot instead.`);
       }
 
       async function fetchCachedPkmnImport(username) {
         const slug = getPkmnCacheSlug(username);
         if (!slug) throw new Error("No cached pkmn.gg username was provided.");
         const embedded = readEmbeddedPkmnImport(username);
-        if (embedded) return embedded;
+        if (embedded) return assertFreshPkmnCache(embedded, username);
         const response = await fetch(`data/pkmn/${encodeURIComponent(slug)}.json?_pokeBinder=${Date.now()}`, {
           cache: "no-store",
           headers: { Accept: "application/json" }
@@ -4375,7 +4383,7 @@
           throw new Error(`The cached pkmn.gg import for ${username} is incomplete.`);
         }
         const cachedAt = payload.cachedAt ? ` cached ${formatCloudTime(payload.cachedAt)}` : "";
-        return { pageProps, pkmnCollection, sourceLabel: `cached pkmn.gg data${cachedAt}` };
+        return assertFreshPkmnCache({ pageProps, pkmnCollection, cachedAt: payload.cachedAt || "", sourceLabel: `cached pkmn.gg data${cachedAt}` }, username);
       }
 
       async function fetchPrivatePkmnImport(username) {
@@ -4395,32 +4403,37 @@
       }
 
       async function loadPkmnImportSource(username) {
+        let privateError = null;
+        let liveError = null;
+        let cacheError = null;
         try {
           updatePkmnImport("Loading private local pkmn.gg snapshot...");
           return await fetchPrivatePkmnImport(username);
-        } catch (privateError) {
+        } catch (error) {
+          privateError = error;
           console.warn("Private local pkmn.gg snapshot unavailable, trying cached import:", privateError);
         }
         try {
-          updatePkmnImport("Loading cached pkmn.gg collection data...");
-          return await fetchCachedPkmnImport(username);
-        } catch (cacheError) {
-          console.warn("Cached pkmn.gg import unavailable, trying live import:", cacheError);
-        }
-        try {
+          updatePkmnImport("Trying live pkmn.gg...");
           const profileHtml = await fetchPublicPkmnResource(`${PKMN_PROFILE_BASE}/${encodeURIComponent(username)}`, "text");
           const pageProps = parsePkmnProfilePage(profileHtml);
           updatePkmnImport("Loading collection quantities...");
           const pkmnCollection = await loadPkmnCollection(pageProps);
           return { pageProps, pkmnCollection, sourceLabel: "pkmn.gg" };
-        } catch (liveError) {
-          console.warn("Live pkmn.gg import unavailable, trying same-origin cache:", liveError);
-          updatePkmnImport("Live pkmn.gg import is blocked. Loading cached collection data...");
-          try {
-            return await fetchCachedPkmnImport(username);
-          } catch (cacheError) {
-            throw new Error(`${liveError.message || "pkmn.gg import failed"} ${cacheError.message}`);
-          }
+        } catch (error) {
+          liveError = error;
+          console.warn("Live pkmn.gg import unavailable, trying fresh same-origin cache:", liveError);
+        }
+        try {
+          updatePkmnImport("Looking for a fresh cached pkmn.gg snapshot...");
+          return await fetchCachedPkmnImport(username);
+        } catch (error) {
+          cacheError = error;
+          throw new Error([
+            privateError?.message,
+            liveError?.message,
+            cacheError?.message
+          ].filter(Boolean).join(" "));
         }
       }
 
