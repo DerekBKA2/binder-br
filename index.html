@@ -4265,7 +4265,7 @@
             ${status ? `<div class="cloud-status-row"><span class="cloud-status ${statusClass}">${escapeHtml(status)}</span></div>` : ""}
             <div class="cloud-actions">
               <button type="button" data-import-action="pkmn" ${importing ? "disabled" : ""}>${importing ? "Importing..." : "Import pkmn.gg"}</button>
-              <button type="button" data-import-action="backup" ${importing ? "disabled" : ""}>Import backup JSON</button>
+              <button type="button" data-import-action="backup" ${importing ? "disabled" : ""}>Import JSON</button>
             </div>
           </section>
         `;
@@ -4321,8 +4321,9 @@
         if (!embedded) return null;
         const pageProps = embedded.pageProps || embedded.profile?.pageProps;
         const pkmnCollection = normalizePkmnCollectionValue(embedded.collection || embedded.pkmnCollection);
+        const cachedAt = embedded.cachedAt ? ` cached ${formatCloudTime(embedded.cachedAt)}` : "";
         return pageProps?.userId && Object.keys(pkmnCollection).length
-          ? { pageProps, pkmnCollection, sourceLabel: "cached pkmn.gg data" }
+          ? { pageProps, pkmnCollection, sourceLabel: `cached pkmn.gg data${cachedAt}` }
           : null;
       }
 
@@ -4342,7 +4343,8 @@
         if (!pageProps?.userId || !Object.keys(pkmnCollection).length) {
           throw new Error(`The cached pkmn.gg import for ${username} is incomplete.`);
         }
-        return { pageProps, pkmnCollection, sourceLabel: "cached pkmn.gg data" };
+        const cachedAt = payload.cachedAt ? ` cached ${formatCloudTime(payload.cachedAt)}` : "";
+        return { pageProps, pkmnCollection, sourceLabel: `cached pkmn.gg data${cachedAt}` };
       }
 
       async function loadPkmnImportSource(username) {
@@ -4517,6 +4519,32 @@
         }
       }
 
+      function importedRecordsNeedCardDetail(card, records) {
+        if (card?.variantsKnown && card?.rarity) return false;
+        const list = Array.isArray(records) ? records : [records];
+        return list.some((record) => {
+          const value = normalizeSearch(record?.variant || "").replace(/[^a-z0-9]+/g, "");
+          return value.includes("holo") && !value.includes("reverse");
+        });
+      }
+
+      async function ensureImportedCardDetail(card, records, cache) {
+        if (!importedRecordsNeedCardDetail(card, records)) return card;
+        if (cache.has(card.key)) return cache.get(card.key) || card;
+        try {
+          const detail = await fetchTcgdexJson(card.lang, `cards/${encodeURIComponent(card.id)}`);
+          const normalized = normalizeCardRecord(detail, card.lang, card.setId, state.sets.get(card.setKey));
+          const merged = mergeCard(normalized) || card;
+          await idbPut("cards", merged);
+          cache.set(card.key, merged);
+          return merged;
+        } catch (error) {
+          console.warn("Imported card detail unavailable:", card.id, error);
+          cache.set(card.key, card);
+          return card;
+        }
+      }
+
       async function importPkmnCollection() {
         const usernameInput = els.importOverlay.querySelector("#pkmnUsernameInput");
         const username = String(usernameInput?.value || state.pkmnImport.username || "").trim();
@@ -4531,131 +4559,137 @@
 
         try {
           const { pageProps, pkmnCollection, sourceLabel } = await loadPkmnImportSource(username);
-          const cardProperties = Object.entries(pkmnCollection || {});
-          if (!cardProperties.length) throw new Error("This public pkmn.gg profile has no cards to import.");
-
-          updatePkmnImport("Matching pkmn.gg sets to TCGdex...");
-          const [englishSets, japaneseSets] = await Promise.all([
-            getTcgdexSetsForPkmnImport("en"),
-            getTcgdexSetsForPkmnImport("ja")
-          ]);
-          const allPkmnSets = Array.isArray(pageProps.allSets) ? pageProps.allSets : [];
-          const sortedPkmnSetIds = allPkmnSets.map((set) => String(set.id || "")).filter(Boolean).sort((a, b) => b.length - a.length);
-          const usedSetIds = Array.from(new Set(cardProperties.map(([cardId]) => getPkmnSetIdForCard(cardId, sortedPkmnSetIds)).filter(Boolean)));
-          const mappings = usedSetIds.map((pkmnSetId) => {
-            const pkmnSet = allPkmnSets.find((set) => set.id === pkmnSetId);
-            const lang = pkmnSet?.category === "JP" ? "ja" : pkmnSet?.category === "EN" ? "en" : "";
-            const tcgdexSet = lang ? findTcgdexSetForPkmn(pkmnSet, lang === "ja" ? japaneseSets : englishSets) : null;
-            return tcgdexSet ? { pkmnSetId, pkmnSet, tcgdexSet, lang } : null;
-          }).filter(Boolean);
-          const mappingBySet = new Map(mappings.map((mapping) => [mapping.pkmnSetId, mapping]));
-          const progress = { count: 0, total: mappings.length };
-          const detailedMappings = [];
-          await mapLimit(mappings, 5, async (mapping) => {
-            detailedMappings.push(await cacheImportedSetCatalog(mapping, progress));
-          });
-          const detailedBySet = new Map(detailedMappings.map((mapping) => [mapping.pkmnSetId, mapping]));
-
-          const specialSetIds = new Set(cardProperties.map(([cardId]) => {
-            const setId = getPkmnSetIdForCard(cardId, sortedPkmnSetIds);
-            const localId = setId ? cardId.slice(setId.length + 1) : "";
-            return localId && !/^\d+$/.test(localId) ? setId : "";
-          }).filter(Boolean));
-          const specialCatalogs = new Map();
-          await mapLimit(Array.from(specialSetIds), 3, async (setId) => {
-            try {
-              const payload = await fetchPublicPkmnResource(`${PKMN_API_BASE}/v1/set/cards/${encodeURIComponent(setId)}`);
-              specialCatalogs.set(setId, payload?.value || []);
-            } catch (error) {
-              console.warn("Optional pkmn.gg special card catalog skipped:", setId, error);
-            }
-          });
-
-          const imported = new Map();
-          let importedQuantity = 0;
-          let skippedQuantity = 0;
-          cardProperties.forEach(([pkmnCardId, records]) => {
-            const pkmnSetId = getPkmnSetIdForCard(pkmnCardId, sortedPkmnSetIds);
-            const mapping = detailedBySet.get(pkmnSetId);
-            if (!mapping) {
-              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
-              return;
-            }
-            const localId = pkmnCardId.slice(pkmnSetId.length + 1);
-            const localKey = normalizeCollectionLocalId(localId);
-            let tcgdexCard = mapping.cards.find((card) => normalizeCollectionLocalId(card.localId) === localKey);
-            if (!tcgdexCard && specialCatalogs.has(pkmnSetId)) {
-              const aliases = [pkmnCardId.toLowerCase(), pkmnCardId.toLowerCase().replace("question_mark", "?"), pkmnCardId.toLowerCase().replace("exclamation_mark", "!")];
-              const pkmnCard = specialCatalogs.get(pkmnSetId).find((card) => aliases.includes(String(card.id || "").toLowerCase()));
-              if (pkmnCard) {
-                const combinedName = normalizePkmnCardName(`${pkmnCard.name || ""} ${pkmnCard.number || ""}`);
-                const nameMatches = mapping.cards.filter((card) => normalizePkmnCardName(card.name) === combinedName);
-                if (nameMatches.length === 1) tcgdexCard = nameMatches[0];
-              }
-            }
-            if (!tcgdexCard) {
-              skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
-              return;
-            }
-            const sharedKey = resolveSharedCollectionKey(tcgdexCard);
-            if (!imported.has(sharedKey)) imported.set(sharedKey, { normalQty: 0, holoQty: 0, reverseQty: 0 });
-            (Array.isArray(records) ? records : [records]).forEach((record) => {
-              const quantity = getPkmnRecordQuantity(record);
-              const field = getPkmnVariantField(record?.variant, tcgdexCard);
-              if (!field) {
-                skippedQuantity += quantity;
-                return;
-              }
-              imported.get(sharedKey)[field] += quantity;
-              importedQuantity += quantity;
-            });
-          });
-
-          const importedAt = new Date().toISOString();
-          state.collection.forEach((entry, key) => {
-            if (entry.accountId !== state.activeAccountId) return;
-            const hasPkmnContribution = Number(entry.pkmnNormalQty || 0) > 0 || Number(entry.pkmnHoloQty || 0) > 0 || Number(entry.pkmnReverseQty || 0) > 0;
-            if (!hasPkmnContribution) return;
-            ["normal", "holo", "reverse"].forEach((variant) => {
-              const field = `${variant}Qty`;
-              const pkmnField = `pkmn${variant[0].toUpperCase()}${variant.slice(1)}Qty`;
-              entry[field] = Math.max(0, Number(entry[field] || 0) - Number(entry[pkmnField] || 0));
-              entry[pkmnField] = 0;
-            });
-            entry.pkmnUsername = username;
-            entry.updatedAt = importedAt;
-            state.collection.set(key, entry);
-          });
-          imported.forEach((quantities, sharedKey) => {
-            const entry = getCollection(sharedKey);
-            ["normal", "holo", "reverse"].forEach((variant) => {
-              const field = `${variant}Qty`;
-              const pkmnField = `pkmn${variant[0].toUpperCase()}${variant.slice(1)}Qty`;
-              const quantity = Number(quantities[field] || 0);
-              entry[field] = Number(entry[field] || 0) + quantity;
-              entry[pkmnField] = quantity;
-            });
-            entry.pkmnUsername = username;
-            entry.updatedAt = importedAt;
-            state.collection.set(sharedKey, entry);
-          });
-          const persistedCollection = Array.from(state.collection.values()).filter(isCollectionEntryMeaningful);
-          await idbClear("collection");
-          await idbPutMany("collection", persistedCollection);
-          state.filter = "all";
-          state.homePage = 1;
-          renderAll();
-          scheduleCloudSync();
-          const skippedText = skippedQuantity ? ` ${skippedQuantity} could not be matched.` : "";
-          state.pkmnImport.status = "done";
-          updateActiveAccountFromImport(username);
-          updatePkmnImport(`${formatNumber(importedQuantity)} cards imported from ${username} via ${sourceLabel}.${skippedText}`, { status: "done" });
-          addNotice(`pkmn.gg collection imported: ${formatNumber(importedQuantity)} cards.`, "warn", 5000);
+          await importPkmnPayload({ username, pageProps, pkmnCollection, sourceLabel });
+          return;
         } catch (error) {
           state.pkmnImport.status = "error";
           updatePkmnImport("", { status: "error", error: error.message || "pkmn.gg import failed." });
           console.warn("pkmn.gg import failed:", error);
         }
+      }
+
+      async function importPkmnPayload({ username, pageProps, pkmnCollection, sourceLabel = "pkmn.gg JSON" }) {
+        const cardProperties = Object.entries(pkmnCollection || {});
+        if (!cardProperties.length) throw new Error("This pkmn.gg import has no cards.");
+
+        updatePkmnImport("Matching pkmn.gg sets to TCGdex...");
+        const [englishSets, japaneseSets] = await Promise.all([
+          getTcgdexSetsForPkmnImport("en"),
+          getTcgdexSetsForPkmnImport("ja")
+        ]);
+        const allPkmnSets = Array.isArray(pageProps.allSets) ? pageProps.allSets : [];
+        const sortedPkmnSetIds = allPkmnSets.map((set) => String(set.id || "")).filter(Boolean).sort((a, b) => b.length - a.length);
+        const usedSetIds = Array.from(new Set(cardProperties.map(([cardId]) => getPkmnSetIdForCard(cardId, sortedPkmnSetIds)).filter(Boolean)));
+        const mappings = usedSetIds.map((pkmnSetId) => {
+          const pkmnSet = allPkmnSets.find((set) => set.id === pkmnSetId);
+          const lang = pkmnSet?.category === "JP" ? "ja" : pkmnSet?.category === "EN" ? "en" : "";
+          const tcgdexSet = lang ? findTcgdexSetForPkmn(pkmnSet, lang === "ja" ? japaneseSets : englishSets) : null;
+          return tcgdexSet ? { pkmnSetId, pkmnSet, tcgdexSet, lang } : null;
+        }).filter(Boolean);
+        const progress = { count: 0, total: mappings.length };
+        const detailedMappings = [];
+        await mapLimit(mappings, 5, async (mapping) => {
+          detailedMappings.push(await cacheImportedSetCatalog(mapping, progress));
+        });
+        const detailedBySet = new Map(detailedMappings.map((mapping) => [mapping.pkmnSetId, mapping]));
+
+        const specialSetIds = new Set(cardProperties.map(([cardId]) => {
+          const setId = getPkmnSetIdForCard(cardId, sortedPkmnSetIds);
+          const localId = setId ? cardId.slice(setId.length + 1) : "";
+          return localId && !/^\d+$/.test(localId) ? setId : "";
+        }).filter(Boolean));
+        const specialCatalogs = new Map();
+        await mapLimit(Array.from(specialSetIds), 3, async (setId) => {
+          try {
+            const payload = await fetchPublicPkmnResource(`${PKMN_API_BASE}/v1/set/cards/${encodeURIComponent(setId)}`);
+            specialCatalogs.set(setId, payload?.value || []);
+          } catch (error) {
+            console.warn("Optional pkmn.gg special card catalog skipped:", setId, error);
+          }
+        });
+
+        const imported = new Map();
+        let importedQuantity = 0;
+        let skippedQuantity = 0;
+        const importedDetailCache = new Map();
+        for (const [pkmnCardId, records] of cardProperties) {
+          const pkmnSetId = getPkmnSetIdForCard(pkmnCardId, sortedPkmnSetIds);
+          const mapping = detailedBySet.get(pkmnSetId);
+          if (!mapping) {
+            skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
+            continue;
+          }
+          const localId = pkmnCardId.slice(pkmnSetId.length + 1);
+          const localKey = normalizeCollectionLocalId(localId);
+          let tcgdexCard = mapping.cards.find((card) => normalizeCollectionLocalId(card.localId) === localKey);
+          if (!tcgdexCard && specialCatalogs.has(pkmnSetId)) {
+            const aliases = [pkmnCardId.toLowerCase(), pkmnCardId.toLowerCase().replace("question_mark", "?"), pkmnCardId.toLowerCase().replace("exclamation_mark", "!")];
+            const pkmnCard = specialCatalogs.get(pkmnSetId).find((card) => aliases.includes(String(card.id || "").toLowerCase()));
+            if (pkmnCard) {
+              const combinedName = normalizePkmnCardName(`${pkmnCard.name || ""} ${pkmnCard.number || ""}`);
+              const nameMatches = mapping.cards.filter((card) => normalizePkmnCardName(card.name) === combinedName);
+              if (nameMatches.length === 1) tcgdexCard = nameMatches[0];
+            }
+          }
+          if (!tcgdexCard) {
+            skippedQuantity += (Array.isArray(records) ? records : [records]).reduce((sum, record) => sum + getPkmnRecordQuantity(record), 0);
+            continue;
+          }
+          tcgdexCard = await ensureImportedCardDetail(tcgdexCard, records, importedDetailCache);
+          const sharedKey = resolveSharedCollectionKey(tcgdexCard);
+          if (!imported.has(sharedKey)) imported.set(sharedKey, { normalQty: 0, holoQty: 0, reverseQty: 0 });
+          (Array.isArray(records) ? records : [records]).forEach((record) => {
+            const quantity = getPkmnRecordQuantity(record);
+            const field = getPkmnVariantField(record?.variant, tcgdexCard);
+            if (!field) {
+              skippedQuantity += quantity;
+              return;
+            }
+            imported.get(sharedKey)[field] += quantity;
+            importedQuantity += quantity;
+          });
+        }
+
+        const importedAt = new Date().toISOString();
+        state.collection.forEach((entry, key) => {
+          if (entry.accountId !== state.activeAccountId) return;
+          const hasPkmnContribution = Number(entry.pkmnNormalQty || 0) > 0 || Number(entry.pkmnHoloQty || 0) > 0 || Number(entry.pkmnReverseQty || 0) > 0;
+          if (!hasPkmnContribution) return;
+          ["normal", "holo", "reverse"].forEach((variant) => {
+            const field = `${variant}Qty`;
+            const pkmnField = `pkmn${variant[0].toUpperCase()}${variant.slice(1)}Qty`;
+            entry[field] = Math.max(0, Number(entry[field] || 0) - Number(entry[pkmnField] || 0));
+            entry[pkmnField] = 0;
+          });
+          entry.pkmnUsername = username;
+          entry.updatedAt = importedAt;
+          state.collection.set(key, entry);
+        });
+        imported.forEach((quantities, sharedKey) => {
+          const entry = getCollection(sharedKey);
+          ["normal", "holo", "reverse"].forEach((variant) => {
+            const field = `${variant}Qty`;
+            const pkmnField = `pkmn${variant[0].toUpperCase()}${variant.slice(1)}Qty`;
+            const quantity = Number(quantities[field] || 0);
+            entry[field] = Number(entry[field] || 0) + quantity;
+            entry[pkmnField] = quantity;
+          });
+          entry.pkmnUsername = username;
+          entry.updatedAt = importedAt;
+          state.collection.set(sharedKey, entry);
+        });
+        const persistedCollection = Array.from(state.collection.values()).filter(isCollectionEntryMeaningful);
+        await idbClear("collection");
+        await idbPutMany("collection", persistedCollection);
+        state.filter = "all";
+        state.homePage = 1;
+        renderAll();
+        scheduleCloudSync();
+        const skippedText = skippedQuantity ? ` ${skippedQuantity} could not be matched.` : "";
+        state.pkmnImport.status = "done";
+        updateActiveAccountFromImport(username);
+        updatePkmnImport(`${formatNumber(importedQuantity)} cards imported from ${username} via ${sourceLabel}.${skippedText}`, { status: "done" });
+        addNotice(`pkmn.gg collection imported: ${formatNumber(importedQuantity)} cards.`, "warn", 5000);
       }
 
       function renderNotices() {
@@ -6724,6 +6758,20 @@
         URL.revokeObjectURL(url);
       }
 
+      function getPkmnImportFromJson(payload) {
+        const pageProps = payload?.pageProps || payload?.props?.pageProps || payload?.props?.initialState?.pageProps || null;
+        const pkmnCollection = normalizePkmnCollectionValue(payload?.pkmnCollection || (payload?.source === "pkmn.gg" ? payload?.collection : null));
+        if (!pageProps?.userId || !Object.keys(pkmnCollection).length) return null;
+        const username = String(payload?.username || pageProps.username || pageProps.pageProfile?.username || state.pkmnImport.username || "").trim();
+        const cachedAt = payload?.cachedAt ? ` cached ${formatCloudTime(payload.cachedAt)}` : "";
+        return {
+          username: username || DEFAULT_ACCOUNT_NAME,
+          pageProps,
+          pkmnCollection,
+          sourceLabel: `pkmn.gg JSON${cachedAt}`
+        };
+      }
+
       async function importBackup(event) {
         const file = event.target.files?.[0];
         event.target.value = "";
@@ -6731,6 +6779,19 @@
         try {
           const text = await file.text();
           const backup = JSON.parse(text);
+          const pkmnImport = getPkmnImportFromJson(backup);
+          if (pkmnImport) {
+            if (!window.confirm(`Import this pkmn.gg JSON for ${pkmnImport.username}? Existing pkmn.gg quantities for this account will be replaced.`)) {
+              return;
+            }
+            state.pkmnImport.username = pkmnImport.username;
+            state.pkmnImport.status = "importing";
+            state.pkmnImport.error = "";
+            updatePkmnImport("Importing pkmn.gg JSON...");
+            await importPkmnPayload(pkmnImport);
+            closeImportPanel();
+            return;
+          }
           if (!window.confirm("Import this backup? Existing collection quantities for matching cards will be replaced.")) {
             return;
           }
